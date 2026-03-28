@@ -1,0 +1,85 @@
+name: 'bincheck'
+description: 'Fast binary security property checker for ELF and PE files. Checks RELRO, NX, PIE, Stack Canary, and more.'
+author: 'kazu11max17'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  files:
+    description: 'Space-separated list of binary file paths to check'
+    required: true
+  format:
+    description: 'Output format: table, json, or sarif'
+    required: false
+    default: 'table'
+  strict:
+    description: 'Fail the step if any security check does not pass'
+    required: false
+    default: 'false'
+  version:
+    description: 'bincheck version to install (e.g. "0.1.0"). Defaults to latest.'
+    required: false
+    default: ''
+  sarif-upload:
+    description: 'Automatically upload SARIF results to GitHub Code Scanning (requires format: sarif)'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      shell: bash
+
+    - name: Cache cargo registry and bincheck binary
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ~/.cargo/bin/bincheck
+        key: bincheck-${{ inputs.version || 'latest' }}-${{ runner.os }}
+
+    - name: Install bincheck
+      shell: bash
+      run: |
+        if command -v bincheck &> /dev/null; then
+          echo "bincheck already installed (cached)"
+          bincheck --version
+        else
+          if [ -n "${{ inputs.version }}" ]; then
+            cargo install bincheck --version "${{ inputs.version }}"
+          else
+            cargo install bincheck
+          fi
+        fi
+
+    - name: Run bincheck
+      shell: bash
+      run: |
+        ARGS=""
+
+        if [ "${{ inputs.format }}" != "table" ]; then
+          ARGS="$ARGS -f ${{ inputs.format }}"
+        fi
+
+        if [ "${{ inputs.strict }}" = "true" ]; then
+          ARGS="$ARGS --strict"
+        fi
+
+        if [ "${{ inputs.format }}" = "sarif" ]; then
+          bincheck ${{ inputs.files }} $ARGS > bincheck-results.sarif
+          cat bincheck-results.sarif
+        else
+          bincheck ${{ inputs.files }} $ARGS
+        fi
+
+    - name: Upload SARIF to GitHub Code Scanning
+      if: ${{ inputs.format == 'sarif' && inputs.sarif-upload == 'true' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: bincheck-results.sarif
+        category: bincheck
