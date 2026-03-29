@@ -1,5 +1,9 @@
 # bincheck
 
+[![CI](https://github.com/kazu11max17/bincheck/actions/workflows/ci.yml/badge.svg)](https://github.com/kazu11max17/bincheck/actions)
+[![Crates.io](https://img.shields.io/crates/v/bincheck.svg)](https://crates.io/crates/bincheck)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 Fast binary security property checker for ELF and PE files.
 
 Inspect hardening features (RELRO, Stack Canary, NX, PIE, ASLR, DEP, CFG, etc.) in a single command.
