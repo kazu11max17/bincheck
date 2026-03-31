@@ -188,10 +188,19 @@ fn format_table(results: &[CheckResult]) -> String {
                     Cell::new(status_cell(pe.dep_nx)),
                     Cell::new(if pe.dep_nx { "NX_COMPAT" } else { "" }),
                 ]);
+                let cfg_status = if pe.cfg {
+                    pass_label()
+                } else {
+                    warn_label()
+                };
                 table.add_row(vec![
                     Cell::new("CFG"),
-                    Cell::new(status_cell(pe.cfg)),
-                    Cell::new(if pe.cfg { "GUARD_CF" } else { "" }),
+                    Cell::new(cfg_status),
+                    Cell::new(if pe.cfg {
+                        "GUARD_CF"
+                    } else {
+                        "Not enabled (optional)"
+                    }),
                 ]);
                 table.add_row(vec![
                     Cell::new("SafeSEH"),
@@ -265,13 +274,18 @@ fn format_table(results: &[CheckResult]) -> String {
                         "__DATA executable!"
                     }),
                 ]);
+                let codesig_status = if macho.code_signature {
+                    pass_label()
+                } else {
+                    warn_label()
+                };
                 table.add_row(vec![
                     Cell::new("Code Signature"),
-                    Cell::new(status_cell(macho.code_signature)),
+                    Cell::new(codesig_status),
                     Cell::new(if macho.code_signature {
                         "LC_CODE_SIGNATURE present"
                     } else {
-                        "Not signed"
+                        "Not signed (optional)"
                     }),
                 ]);
                 table.add_row(vec![

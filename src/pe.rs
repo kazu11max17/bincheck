@@ -39,7 +39,7 @@ pub struct PeCheckResult {
 impl PeCheckResult {
     /// Returns true if any security check is in a failing state
     pub fn has_failures(&self) -> bool {
-        !self.aslr || !self.dep_nx || !self.cfg || !self.safe_seh
+        !self.aslr || !self.dep_nx || !self.safe_seh
     }
 }
 
@@ -196,7 +196,8 @@ mod tests {
     }
 
     #[test]
-    fn has_failures_no_cfg() {
+    fn has_failures_cfg_not_checked() {
+        // cfg=false alone should NOT cause has_failures (warn-only, not available on MinGW/older MSVC)
         let result = PeCheckResult {
             aslr: true,
             high_entropy_aslr: true,
@@ -206,7 +207,10 @@ mod tests {
             authenticode: true,
             debug_info: no_pe_debug_info(),
         };
-        assert!(result.has_failures());
+        assert!(
+            !result.has_failures(),
+            "CFG is not in the has_failures check"
+        );
     }
 
     #[test]

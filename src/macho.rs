@@ -40,7 +40,7 @@ pub struct MachoCheckResult {
 impl MachoCheckResult {
     /// Returns true if any critical security check is in a failing state
     pub fn has_failures(&self) -> bool {
-        !self.pie || !self.stack_canary || !self.nx_stack || !self.nx_heap || !self.code_signature
+        !self.pie || !self.stack_canary || !self.nx_stack || !self.nx_heap
     }
 }
 
@@ -559,7 +559,8 @@ mod tests {
     }
 
     #[test]
-    fn has_failures_no_code_signature() {
+    fn has_failures_code_signature_not_checked() {
+        // code_signature=false alone should NOT cause has_failures (warn-only, dev builds are unsigned)
         let result = MachoCheckResult {
             pie: true,
             stack_canary: true,
@@ -570,7 +571,10 @@ mod tests {
             hardened_runtime: true,
             restrict_segment: true,
         };
-        assert!(result.has_failures());
+        assert!(
+            !result.has_failures(),
+            "code_signature is not in the has_failures check"
+        );
     }
 
     #[test]
