@@ -402,7 +402,7 @@ fn format_sarif(results: &[CheckResult]) -> String {
 
     for result in results {
         let checks = collect_check_items(result);
-        for (rule_id, name, pass, details) in checks {
+        for (rule_id, name, pass, details, warn_only) in checks {
             if !seen_rules.contains(&rule_id) {
                 rules.push(SarifRule {
                     id: rule_id.clone(),
@@ -415,16 +415,29 @@ fn format_sarif(results: &[CheckResult]) -> String {
             }
 
             if !pass {
-                sarif_results.push(SarifResult {
-                    rule_id,
-                    level: "warning".to_string(),
-                    message: SarifMessage {
-                        text: if details.is_empty() {
+                let (level, msg) = if warn_only {
+                    (
+                        "note".to_string(),
+                        if details.is_empty() {
+                            format!("{} not enabled (informational)", name)
+                        } else {
+                            format!("{} not enabled (informational): {}", name, details)
+                        },
+                    )
+                } else {
+                    (
+                        "warning".to_string(),
+                        if details.is_empty() {
                             format!("{} check failed", name)
                         } else {
                             format!("{} check failed: {}", name, details)
                         },
-                    },
+                    )
+                };
+                sarif_results.push(SarifResult {
+                    rule_id,
+                    level,
+                    message: SarifMessage { text: msg },
                     locations: vec![SarifLocation {
                         physical_location: SarifPhysicalLocation {
                             artifact_location: SarifArtifactLocation {
@@ -456,9 +469,10 @@ fn format_sarif(results: &[CheckResult]) -> String {
     serde_json::to_string_pretty(&report).unwrap_or_else(|e| format!("SARIF error: {}", e))
 }
 
-/// Collect (rule_id, name, pass, details) tuples from a check result
+/// Collect (rule_id, name, pass, details, warn_only) tuples from a check result.
+/// warn_only=true means the item is informational and should use "note" level in SARIF.
 #[allow(clippy::type_complexity)]
-fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, String)> {
+fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, String, bool)> {
     let mut items = Vec::new();
 
     match &result.result {
@@ -469,42 +483,49 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
                 "RELRO".to_string(),
                 relro_pass,
                 elf.relro.to_string(),
+                false,
             ));
             items.push((
                 "BHC002".to_string(),
                 "Stack Canary".to_string(),
                 elf.stack_canary,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC003".to_string(),
                 "NX".to_string(),
                 elf.nx,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC004".to_string(),
                 "PIE".to_string(),
                 elf.pie,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC005".to_string(),
                 "Fortify Source".to_string(),
                 elf.fortify_source,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC006".to_string(),
                 "RPATH".to_string(),
                 elf.rpath.is_none(),
                 elf.rpath.clone().unwrap_or_default(),
+                false,
             ));
             items.push((
                 "BHC007".to_string(),
                 "RUNPATH".to_string(),
                 elf.runpath.is_none(),
                 elf.runpath.clone().unwrap_or_default(),
+                false,
             ));
             items.push((
                 "BHC008".to_string(),
@@ -520,6 +541,7 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
                 } else {
                     String::new()
                 },
+                false,
             ));
             items.push((
                 "BHC009".to_string(),
@@ -530,6 +552,7 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
                 } else {
                     String::new()
                 },
+                false,
             ));
         }
         FormatResult::Pe(pe) => {
@@ -538,36 +561,42 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
                 "ASLR".to_string(),
                 pe.aslr,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC102".to_string(),
                 "High Entropy ASLR".to_string(),
                 pe.high_entropy_aslr,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC103".to_string(),
                 "DEP/NX".to_string(),
                 pe.dep_nx,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC104".to_string(),
                 "CFG".to_string(),
                 pe.cfg,
                 String::new(),
+                true,
             ));
             items.push((
                 "BHC105".to_string(),
                 "SafeSEH".to_string(),
                 pe.safe_seh,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC106".to_string(),
                 "Authenticode".to_string(),
                 pe.authenticode,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC107".to_string(),
@@ -580,6 +609,7 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
                 } else {
                     String::new()
                 },
+                false,
             ));
         }
         FormatResult::MachO(macho) => {
@@ -588,48 +618,56 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
                 "PIE".to_string(),
                 macho.pie,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC202".to_string(),
                 "Stack Canary".to_string(),
                 macho.stack_canary,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC203".to_string(),
                 "ARC".to_string(),
                 macho.arc,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC204".to_string(),
                 "NX Stack".to_string(),
                 macho.nx_stack,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC205".to_string(),
                 "NX Heap".to_string(),
                 macho.nx_heap,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC206".to_string(),
                 "Code Signature".to_string(),
                 macho.code_signature,
                 String::new(),
+                true,
             ));
             items.push((
                 "BHC207".to_string(),
                 "Hardened Runtime".to_string(),
                 macho.hardened_runtime,
                 String::new(),
+                false,
             ));
             items.push((
                 "BHC208".to_string(),
                 "Restrict Segment".to_string(),
                 macho.restrict_segment,
                 String::new(),
+                false,
             ));
         }
         FormatResult::Unsupported => {
@@ -638,6 +676,7 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
                 "Format".to_string(),
                 false,
                 "Unsupported binary format".to_string(),
+                false,
             ));
         }
     }
@@ -986,6 +1025,50 @@ mod tests {
     }
 
     #[test]
+    fn sarif_pe_cfg_is_note_level() {
+        // CFG=false should produce "note" level, not "warning"
+        let results = vec![sample_pe_result()];
+        let output = format_results(&results, OutputFormat::Sarif);
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let sarif_results = parsed["runs"][0]["results"].as_array().unwrap();
+        let cfg_result = sarif_results
+            .iter()
+            .find(|r| r["ruleId"] == "BHC104")
+            .expect("CFG result should exist");
+        assert_eq!(cfg_result["level"], "note", "CFG should be note level");
+        assert!(
+            cfg_result["message"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("informational"),
+            "CFG message should indicate informational"
+        );
+    }
+
+    #[test]
+    fn sarif_macho_code_signature_is_note_level() {
+        // code_signature=false should produce "note" level, not "warning"
+        let results = vec![sample_macho_result_all_fail()];
+        let output = format_results(&results, OutputFormat::Sarif);
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let sarif_results = parsed["runs"][0]["results"].as_array().unwrap();
+        let codesig = sarif_results
+            .iter()
+            .find(|r| r["ruleId"] == "BHC206")
+            .expect("Code Signature result should exist");
+        assert_eq!(
+            codesig["level"], "note",
+            "Code Signature should be note level"
+        );
+        // Other checks (e.g. PIE) should still be "warning"
+        let pie = sarif_results
+            .iter()
+            .find(|r| r["ruleId"] == "BHC201")
+            .expect("PIE result should exist");
+        assert_eq!(pie["level"], "warning", "PIE should be warning level");
+    }
+
+    #[test]
     fn sarif_empty_results() {
         let results: Vec<CheckResult> = vec![];
         let output = format_results(&results, OutputFormat::Sarif);
@@ -1071,6 +1154,26 @@ mod tests {
         let rpath = items.iter().find(|i| i.0 == "BHC006").unwrap();
         assert!(!rpath.2, "RPATH present should fail");
         assert_eq!(rpath.3, "/usr/local/lib");
+    }
+
+    #[test]
+    fn collect_check_items_pe_cfg_is_warn_only() {
+        let result = sample_pe_result();
+        let items = collect_check_items(&result);
+        let cfg = items.iter().find(|i| i.0 == "BHC104").unwrap();
+        assert!(cfg.4, "CFG should be warn_only");
+        let aslr = items.iter().find(|i| i.0 == "BHC101").unwrap();
+        assert!(!aslr.4, "ASLR should not be warn_only");
+    }
+
+    #[test]
+    fn collect_check_items_macho_code_signature_is_warn_only() {
+        let result = sample_macho_result_all_fail();
+        let items = collect_check_items(&result);
+        let codesig = items.iter().find(|i| i.0 == "BHC206").unwrap();
+        assert!(codesig.4, "Code Signature should be warn_only");
+        let pie = items.iter().find(|i| i.0 == "BHC201").unwrap();
+        assert!(!pie.4, "PIE should not be warn_only");
     }
 
     // ---- Mach-O table output ----
