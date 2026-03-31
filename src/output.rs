@@ -188,11 +188,7 @@ fn format_table(results: &[CheckResult]) -> String {
                     Cell::new(status_cell(pe.dep_nx)),
                     Cell::new(if pe.dep_nx { "NX_COMPAT" } else { "" }),
                 ]);
-                let cfg_status = if pe.cfg {
-                    pass_label()
-                } else {
-                    warn_label()
-                };
+                let cfg_status = if pe.cfg { pass_label() } else { warn_label() };
                 table.add_row(vec![
                     Cell::new("CFG"),
                     Cell::new(cfg_status),
