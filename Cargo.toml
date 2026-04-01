@@ -5,7 +5,7 @@ edition = "2024"
 description = "Fast binary security property checker for ELF, PE, and Mach-O files"
 license = "Apache-2.0"
 repository = "https://github.com/kazu11max17/bincheck"
-keywords = ["binary", "security", "elf", "pe", "macho", "hardening"]
+keywords = ["binary", "security", "elf", "pe", "hardening"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
