@@ -28,6 +28,7 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
 
+    let is_table = cli.format != "json" && cli.format != "sarif";
     let output_format = match cli.format.as_str() {
         "json" => OutputFormat::Json,
         "sarif" => OutputFormat::Sarif,
@@ -49,6 +50,27 @@ fn main() {
 
     let output = format_results(&results, output_format);
     println!("{}", output);
+
+    // Print summary line for table output when multiple files are checked
+    if is_table && (results.len() + if has_errors { 1 } else { 0 }) > 1 {
+        let passed = results.iter().filter(|r| !r.has_failures()).count();
+        let failed = results.iter().filter(|r| r.has_failures()).count();
+        let errors = if has_errors {
+            cli.files.len() - results.len()
+        } else {
+            0
+        };
+        let total = results.len() + errors;
+        let mut parts = vec![format!("{} files checked", total)];
+        parts.push(format!("{} passed", passed));
+        if failed > 0 {
+            parts.push(format!("{} failed", failed));
+        }
+        if errors > 0 {
+            parts.push(format!("{} errors", errors));
+        }
+        eprintln!("{}", parts.join(", "));
+    }
 
     if cli.strict {
         let any_fail = results.iter().any(|r| r.has_failures());

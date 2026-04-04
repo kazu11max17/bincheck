@@ -97,10 +97,23 @@ fn check_relro(elf: &Elf) -> RelroStatus {
     }
 }
 
-/// Check for stack canary (__stack_chk_fail in dynamic symbols)
+/// Check for stack canary (__stack_chk_fail in dynamic or static symbols)
+///
+/// Dynamically linked binaries have __stack_chk_fail in dynsyms.
+/// Statically linked binaries (common in embedded) only have it in symtab.
 fn check_stack_canary(elf: &Elf) -> bool {
-    elf.dynsyms.iter().any(|sym| {
+    let in_dynsyms = elf.dynsyms.iter().any(|sym| {
         if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+            name == "__stack_chk_fail"
+        } else {
+            false
+        }
+    });
+    if in_dynsyms {
+        return true;
+    }
+    elf.syms.iter().any(|sym| {
+        if let Some(name) = elf.strtab.get_at(sym.st_name) {
             name == "__stack_chk_fail"
         } else {
             false

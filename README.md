@@ -71,7 +71,7 @@ File: /usr/bin/ls (ELF)
 | Check | What it detects |
 |-------|----------------|
 | RELRO | GOT protection level (Full / Partial / None) |
-| Stack Canary | `__stack_chk_fail` in dynamic symbols |
+| Stack Canary | `__stack_chk_fail` in dynamic or static symbols |
 | NX | Non-executable stack (W^X) |
 | PIE | Position Independent Executable (ASLR support) |
 | Fortify Source | Fortified libc functions (`__*_chk`) |
