@@ -8,6 +8,19 @@ const IMAGE_DLLCHARACTERISTICS_NX_COMPAT: u16 = 0x0100;
 const IMAGE_DLLCHARACTERISTICS_NO_SEH: u16 = 0x0400;
 const IMAGE_DLLCHARACTERISTICS_GUARD_CF: u16 = 0x4000;
 
+/// SafeSEH detection status for PE binaries
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub enum SafeSehStatus {
+    /// SafeSEH enabled (32-bit PE with SEHandlerTable in Load Config)
+    Enabled,
+    /// SafeSEH not present (32-bit PE without SEHandler table)
+    NotFound,
+    /// Not applicable (64-bit PE uses table-based exception handling)
+    NotApplicable,
+    /// SEH is entirely disabled via NO_SEH flag
+    NoSeh,
+}
+
 /// Debug information found in a PE binary
 #[derive(Debug, Clone, Serialize)]
 pub struct PeDebugInfo {
@@ -31,7 +44,7 @@ pub struct PeCheckResult {
     pub high_entropy_aslr: bool,
     pub dep_nx: bool,
     pub cfg: bool,
-    pub safe_seh: bool,
+    pub safe_seh: SafeSehStatus,
     pub authenticode: bool,
     pub debug_info: PeDebugInfo,
 }
@@ -39,7 +52,7 @@ pub struct PeCheckResult {
 impl PeCheckResult {
     /// Returns true if any security check is in a failing state
     pub fn has_failures(&self) -> bool {
-        !self.aslr || !self.dep_nx || !self.safe_seh
+        !self.aslr || !self.dep_nx || self.safe_seh == SafeSehStatus::NotFound
     }
 }
 
@@ -56,10 +69,24 @@ pub fn check_pe(pe: &PE) -> PeCheckResult {
     let dep_nx = (dll_characteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT) != 0;
     let cfg = (dll_characteristics & IMAGE_DLLCHARACTERISTICS_GUARD_CF) != 0;
 
-    // SafeSEH: NO_SEH flag means SEH is disabled entirely (not SafeSEH)
-    // If NO_SEH is set, SafeSEH is effectively not applicable / disabled
     let no_seh = (dll_characteristics & IMAGE_DLLCHARACTERISTICS_NO_SEH) != 0;
-    let safe_seh = !no_seh;
+    let safe_seh = if no_seh {
+        SafeSehStatus::NoSeh
+    } else if pe.is_64 {
+        // 64-bit PE uses table-based exception handling; SafeSEH is a 32-bit concept
+        SafeSehStatus::NotApplicable
+    } else {
+        // 32-bit PE: check Load Config Directory for SEHandlerTable
+        match &pe.load_config_data {
+            Some(lcd)
+                if lcd.directory.se_handler_count.unwrap_or(0) > 0
+                    && lcd.directory.se_handler_table.unwrap_or(0) != 0 =>
+            {
+                SafeSehStatus::Enabled
+            }
+            _ => SafeSehStatus::NotFound,
+        }
+    };
 
     // Authenticode: check for security data directory entry (Certificate Table)
     let authenticode = pe
@@ -160,7 +187,35 @@ mod tests {
             high_entropy_aslr: true,
             dep_nx: true,
             cfg: true,
-            safe_seh: true,
+            safe_seh: SafeSehStatus::Enabled,
+            authenticode: true,
+            debug_info: no_pe_debug_info(),
+        };
+        assert!(!result.has_failures());
+    }
+
+    #[test]
+    fn has_failures_not_applicable_is_not_failure() {
+        let result = PeCheckResult {
+            aslr: true,
+            high_entropy_aslr: true,
+            dep_nx: true,
+            cfg: true,
+            safe_seh: SafeSehStatus::NotApplicable,
+            authenticode: true,
+            debug_info: no_pe_debug_info(),
+        };
+        assert!(!result.has_failures());
+    }
+
+    #[test]
+    fn has_failures_no_seh_is_not_failure() {
+        let result = PeCheckResult {
+            aslr: true,
+            high_entropy_aslr: true,
+            dep_nx: true,
+            cfg: true,
+            safe_seh: SafeSehStatus::NoSeh,
             authenticode: true,
             debug_info: no_pe_debug_info(),
         };
@@ -174,7 +229,7 @@ mod tests {
             high_entropy_aslr: true,
             dep_nx: true,
             cfg: true,
-            safe_seh: true,
+            safe_seh: SafeSehStatus::Enabled,
             authenticode: true,
             debug_info: no_pe_debug_info(),
         };
@@ -188,7 +243,7 @@ mod tests {
             high_entropy_aslr: true,
             dep_nx: false,
             cfg: true,
-            safe_seh: true,
+            safe_seh: SafeSehStatus::Enabled,
             authenticode: true,
             debug_info: no_pe_debug_info(),
         };
@@ -203,7 +258,7 @@ mod tests {
             high_entropy_aslr: true,
             dep_nx: true,
             cfg: false,
-            safe_seh: true,
+            safe_seh: SafeSehStatus::Enabled,
             authenticode: true,
             debug_info: no_pe_debug_info(),
         };
@@ -214,13 +269,13 @@ mod tests {
     }
 
     #[test]
-    fn has_failures_no_safe_seh() {
+    fn has_failures_safe_seh_not_found() {
         let result = PeCheckResult {
             aslr: true,
             high_entropy_aslr: true,
             dep_nx: true,
             cfg: true,
-            safe_seh: false,
+            safe_seh: SafeSehStatus::NotFound,
             authenticode: true,
             debug_info: no_pe_debug_info(),
         };
@@ -235,7 +290,7 @@ mod tests {
             high_entropy_aslr: true,
             dep_nx: true,
             cfg: true,
-            safe_seh: true,
+            safe_seh: SafeSehStatus::Enabled,
             authenticode: false,
             debug_info: no_pe_debug_info(),
         };
@@ -253,7 +308,7 @@ mod tests {
             high_entropy_aslr: false,
             dep_nx: true,
             cfg: true,
-            safe_seh: true,
+            safe_seh: SafeSehStatus::Enabled,
             authenticode: true,
             debug_info: no_pe_debug_info(),
         };
@@ -270,7 +325,7 @@ mod tests {
             high_entropy_aslr: false,
             dep_nx: false,
             cfg: false,
-            safe_seh: false,
+            safe_seh: SafeSehStatus::NotFound,
             authenticode: false,
             debug_info: no_pe_debug_info(),
         };
@@ -351,10 +406,11 @@ mod tests {
             );
             assert!(result.dep_nx, "NX_COMPAT should enable DEP");
             assert!(result.cfg, "GUARD_CF should enable CFG");
-            // NO_SEH is not set, so safe_seh should be true
-            assert!(
+            // 64-bit PE: SafeSEH is not applicable
+            assert_eq!(
                 result.safe_seh,
-                "SafeSEH should be true when NO_SEH is not set"
+                SafeSehStatus::NotApplicable,
+                "64-bit PE should report SafeSEH as NotApplicable"
             );
             assert!(
                 !result.authenticode,
@@ -374,7 +430,11 @@ mod tests {
             assert!(!result.high_entropy_aslr);
             assert!(!result.dep_nx);
             assert!(!result.cfg);
-            assert!(result.safe_seh, "Without NO_SEH, safe_seh is true");
+            assert_eq!(
+                result.safe_seh,
+                SafeSehStatus::NotApplicable,
+                "64-bit PE should report SafeSEH as NotApplicable"
+            );
             assert!(!result.authenticode);
         } else {
             panic!("Failed to parse minimal PE binary");
@@ -386,7 +446,11 @@ mod tests {
         let bytes = minimal_pe(IMAGE_DLLCHARACTERISTICS_NO_SEH);
         if let Ok(goblin::Object::PE(pe)) = goblin::Object::parse(&bytes) {
             let result = check_pe(&pe);
-            assert!(!result.safe_seh, "NO_SEH flag should disable SafeSEH");
+            assert_eq!(
+                result.safe_seh,
+                SafeSehStatus::NoSeh,
+                "NO_SEH flag should report SafeSEH as NoSeh"
+            );
         } else {
             panic!("Failed to parse minimal PE binary");
         }

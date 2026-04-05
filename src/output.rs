@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::check::{CheckResult, FormatResult};
 use crate::elf::RelroStatus;
+use crate::pe::SafeSehStatus;
 
 /// Output format selection
 pub enum OutputFormat {
@@ -198,10 +199,16 @@ fn format_table(results: &[CheckResult]) -> String {
                         "Not enabled (optional)"
                     }),
                 ]);
+                let (seh_pass, seh_detail) = match &pe.safe_seh {
+                    SafeSehStatus::Enabled => (true, "SEHandler table present"),
+                    SafeSehStatus::NotFound => (false, "No SEHandler table (32-bit)"),
+                    SafeSehStatus::NotApplicable => (true, "N/A (64-bit)"),
+                    SafeSehStatus::NoSeh => (true, "NO_SEH (disabled)"),
+                };
                 table.add_row(vec![
                     Cell::new("SafeSEH"),
-                    Cell::new(status_cell(pe.safe_seh)),
-                    Cell::new(if pe.safe_seh { "SEH enabled" } else { "NO_SEH" }),
+                    Cell::new(status_cell(seh_pass)),
+                    Cell::new(seh_detail),
                 ]);
                 table.add_row(vec![
                     Cell::new("Authenticode"),
@@ -583,7 +590,7 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
             items.push((
                 "BHC105".to_string(),
                 "SafeSEH".to_string(),
-                pe.safe_seh,
+                pe.safe_seh != SafeSehStatus::NotFound,
                 String::new(),
                 false,
             ));
@@ -753,7 +760,7 @@ mod tests {
                 high_entropy_aslr: false,
                 dep_nx: true,
                 cfg: false,
-                safe_seh: true,
+                safe_seh: SafeSehStatus::NotApplicable,
                 authenticode: false,
                 debug_info: no_pe_debug(),
             }),

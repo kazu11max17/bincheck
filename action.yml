@@ -8,7 +8,7 @@ branding:
 
 inputs:
   files:
-    description: 'Space-separated list of binary file paths to check'
+    description: 'List of binary file paths (space or newline separated)'
     required: true
   format:
     description: 'Output format: table, json, or sarif'
@@ -30,51 +30,91 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      shell: bash
-
-    - name: Cache cargo registry and bincheck binary
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          ~/.cargo/bin/bincheck
-        key: bincheck-${{ inputs.version || 'latest' }}-${{ runner.os }}
-
     - name: Install bincheck
       shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        INPUT_VERSION: ${{ inputs.version }}
+        RUNNER_PLATFORM: ${{ runner.os }}-${{ runner.arch }}
       run: |
-        if command -v bincheck &> /dev/null; then
-          echo "bincheck already installed (cached)"
-          bincheck --version
-        else
-          if [ -n "${{ inputs.version }}" ]; then
-            cargo install bincheck --version "${{ inputs.version }}"
+        VERSION="$INPUT_VERSION"
+        if [ -z "$VERSION" ]; then
+          VERSION=$(curl -fsSL -H "Authorization: token ${GH_TOKEN}" \
+            https://api.github.com/repos/kazu11max17/bincheck/releases/latest \
+            2>/dev/null | grep '"tag_name"' | sed 's/.*"tag_name": *"//;s/".*//' || echo "")
+        fi
+
+        # Determine platform
+        case "$RUNNER_PLATFORM" in
+          Linux-X64)   TARGET="x86_64-unknown-linux-gnu" ; EXT="tar.gz" ;;
+          macOS-X64)   TARGET="x86_64-apple-darwin"      ; EXT="tar.gz" ;;
+          macOS-ARM64) TARGET="aarch64-apple-darwin"      ; EXT="tar.gz" ;;
+          Windows-X64) TARGET="x86_64-pc-windows-msvc"   ; EXT="zip"    ;;
+          *)           TARGET="" ;;
+        esac
+
+        INSTALLED=false
+        if [ -n "$VERSION" ] && [ -n "$TARGET" ]; then
+          BASE_URL="https://github.com/kazu11max17/bincheck/releases/download/${VERSION}"
+          ARCHIVE="bincheck-${TARGET}.${EXT}"
+          echo "Downloading bincheck from ${BASE_URL}/${ARCHIVE}"
+          if curl -fsSL "${BASE_URL}/${ARCHIVE}" -o "$ARCHIVE" && \
+             curl -fsSL "${BASE_URL}/${ARCHIVE}.sha256" -o "${ARCHIVE}.sha256"; then
+            echo "Verifying checksum..."
+            sha256sum -c "${ARCHIVE}.sha256"
+            if [ "$EXT" = "tar.gz" ]; then
+              tar xzf "$ARCHIVE"
+            else
+              unzip -o "$ARCHIVE"
+            fi
+            chmod +x bincheck 2>/dev/null || true
+            mkdir -p "$HOME/.local/bin"
+            mv bincheck "$HOME/.local/bin/" 2>/dev/null || sudo mv bincheck /usr/local/bin/
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            INSTALLED=true
+          fi
+        fi
+
+        # Fallback to cargo install
+        if [ "$INSTALLED" = "false" ]; then
+          echo "Prebuilt binary not available, falling back to cargo install"
+          if ! command -v cargo &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          if [ -n "$INPUT_VERSION" ]; then
+            cargo install bincheck --version "$INPUT_VERSION"
           else
             cargo install bincheck
           fi
         fi
 
+        bincheck --version
+
     - name: Run bincheck
       shell: bash
+      env:
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_STRICT: ${{ inputs.strict }}
       run: |
+        FILES=$(echo "$INPUT_FILES" | tr '\n' ' ' | xargs)
         ARGS=""
 
-        if [ "${{ inputs.format }}" != "table" ]; then
-          ARGS="$ARGS -f ${{ inputs.format }}"
+        if [ "$INPUT_FORMAT" != "table" ]; then
+          ARGS="$ARGS -f $INPUT_FORMAT"
         fi
 
-        if [ "${{ inputs.strict }}" = "true" ]; then
+        if [ "$INPUT_STRICT" = "true" ]; then
           ARGS="$ARGS --strict"
         fi
 
-        if [ "${{ inputs.format }}" = "sarif" ]; then
-          bincheck ${{ inputs.files }} $ARGS > bincheck-results.sarif
+        if [ "$INPUT_FORMAT" = "sarif" ]; then
+          bincheck $FILES $ARGS > bincheck-results.sarif
           cat bincheck-results.sarif
         else
-          bincheck ${{ inputs.files }} $ARGS
+          bincheck $FILES $ARGS
         fi
 
     - name: Upload SARIF to GitHub Code Scanning

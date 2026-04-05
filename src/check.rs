@@ -198,13 +198,13 @@ mod tests {
 
     #[test]
     fn check_result_pe_delegates() {
-        use crate::pe::{PeCheckResult, PeDebugInfo};
+        use crate::pe::{PeCheckResult, PeDebugInfo, SafeSehStatus};
         let pe_result = PeCheckResult {
             aslr: true,
             high_entropy_aslr: true,
             dep_nx: true,
             cfg: true,
-            safe_seh: true,
+            safe_seh: SafeSehStatus::Enabled,
             authenticode: false,
             debug_info: PeDebugInfo {
                 has_debug_directory: false,
