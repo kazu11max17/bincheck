@@ -15,9 +15,6 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: bincheck
-          - target: x86_64-apple-darwin
-            os: macos-13
-            artifact: bincheck
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: bincheck
