@@ -3,6 +3,10 @@ use goblin::elf::dynamic::{DF_1_NOW, DF_BIND_NOW, DT_RPATH, DT_RUNPATH};
 use goblin::elf::program_header::{PF_X, PT_GNU_RELRO, PT_GNU_STACK};
 use serde::Serialize;
 
+// ELF e_machine constants (not publicly exported by goblin)
+const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
+
 /// RELRO protection level
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub enum RelroStatus {
@@ -50,6 +54,11 @@ pub struct ElfCheckResult {
     pub pie: bool,
     pub fortify_source: bool,
     pub fortified_functions: Vec<String>,
+    /// Estimated FORTIFY_SOURCE level (1 or 2), or None if unknown/not fortified.
+    /// Level 2 is inferred when format-string checking functions (e.g. __fprintf_chk,
+    /// __snprintf_chk) are present. Level 1 is inferred for other __*_chk functions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fortify_level: Option<u8>,
     pub rpath: Option<String>,
     pub runpath: Option<String>,
     pub debug_info: ElfDebugInfo,
@@ -62,9 +71,32 @@ impl ElfCheckResult {
             || !self.stack_canary
             || !self.nx
             || !self.pie
-            || self.rpath.is_some()
-            || self.runpath.is_some()
+            || self.rpath_is_failure()
+            || self.runpath_is_failure()
     }
+
+    /// Returns true if RPATH is set and is NOT a $ORIGIN-relative path (which is acceptable).
+    pub fn rpath_is_failure(&self) -> bool {
+        match self.rpath.as_deref() {
+            None => false,
+            Some(p) => !is_origin_relative(p),
+        }
+    }
+
+    /// Returns true if RUNPATH is set and is NOT a $ORIGIN-relative path (which is acceptable).
+    pub fn runpath_is_failure(&self) -> bool {
+        match self.runpath.as_deref() {
+            None => false,
+            Some(p) => !is_origin_relative(p),
+        }
+    }
+}
+
+/// Returns true if the given rpath/runpath value is `$ORIGIN` or starts with `$ORIGIN/`.
+/// Such relative paths are acceptable because they do not introduce absolute attacker-controlled
+/// search paths.
+fn is_origin_relative(path: &str) -> bool {
+    path == "$ORIGIN" || path.starts_with("$ORIGIN/")
 }
 
 /// Check RELRO status of an ELF binary
@@ -121,7 +153,16 @@ fn check_stack_canary(elf: &Elf) -> bool {
     })
 }
 
-/// Check NX (No-Execute stack): PT_GNU_STACK without PF_X
+/// Check NX (No-Execute stack): PT_GNU_STACK without PF_X.
+///
+/// When PT_GNU_STACK is present, its PF_X flag directly indicates whether the stack is
+/// executable. When it is absent the answer is architecture-dependent:
+/// - x86_64 (EM_X86_64) and AArch64 (EM_AARCH64): the CPU enforces NX/XN in hardware and
+///   modern Linux kernels default to non-executable stacks, so absence of PT_GNU_STACK means NX
+///   is still active.
+/// - x86 (EM_386): NX depends on PAE/CPU feature; without an explicit PT_GNU_STACK we cannot be
+///   certain, so we fall back to the conservative `false`.
+/// - Other architectures: conservative `false`.
 fn check_nx(elf: &Elf) -> bool {
     for ph in &elf.program_headers {
         if ph.p_type == PT_GNU_STACK {
@@ -129,8 +170,8 @@ fn check_nx(elf: &Elf) -> bool {
             return (ph.p_flags & PF_X) == 0;
         }
     }
-    // If no GNU_STACK segment, assume NX is not explicitly set (conservative)
-    false
+    // No PT_GNU_STACK segment – use architecture to determine default.
+    matches!(elf.header.e_machine, EM_X86_64 | EM_AARCH64)
 }
 
 /// Check if binary is Position Independent Executable
@@ -140,21 +181,78 @@ fn check_pie(elf: &Elf) -> bool {
     elf.header.e_type == goblin::elf::header::ET_DYN
 }
 
-/// Check for fortified functions (__*_chk pattern in dynamic symbols)
-fn check_fortify(elf: &Elf) -> (bool, Vec<String>) {
+/// Format-string checking functions that are only introduced by `-D_FORTIFY_SOURCE=2`.
+/// Their presence suggests level 2 (though it is not guaranteed by the ABI).
+const FORTIFY_LEVEL2_SYMS: &[&str] = &[
+    "__fprintf_chk",
+    "__printf_chk",
+    "__sprintf_chk",
+    "__snprintf_chk",
+    "__vfprintf_chk",
+    "__vprintf_chk",
+    "__vsprintf_chk",
+    "__vsnprintf_chk",
+    "__dprintf_chk",
+    "__vdprintf_chk",
+    "__obstack_printf_chk",
+    "__obstack_vprintf_chk",
+    "__wprintf_chk",
+    "__fwprintf_chk",
+    "__swprintf_chk",
+    "__vwprintf_chk",
+    "__vfwprintf_chk",
+    "__vswprintf_chk",
+];
+
+/// Check for fortified functions (__*_chk pattern in dynamic and static symbols).
+///
+/// Returns `(has_fortify, fortified_function_names, fortify_level)`.
+/// `fortify_level` is `Some(2)` when level-2-specific symbols are found, `Some(1)` when only
+/// level-1 symbols are found, or `None` when no fortified functions are detected.
+fn check_fortify(elf: &Elf) -> (bool, Vec<String>, Option<u8>) {
     let mut fortified = Vec::new();
 
+    // Search dynsyms (dynamically linked binaries)
     for sym in elf.dynsyms.iter() {
         if let Some(name) = elf.dynstrtab.get_at(sym.st_name)
             && name.ends_with("_chk")
             && name.starts_with("__")
         {
-            fortified.push(name.to_string());
+            let s = name.to_string();
+            if !fortified.contains(&s) {
+                fortified.push(s);
+            }
         }
     }
 
-    let has_fortify = !fortified.is_empty();
-    (has_fortify, fortified)
+    // Search symtab (statically linked / unstripped binaries – P1-1 coverage)
+    for sym in elf.syms.iter() {
+        if let Some(name) = elf.strtab.get_at(sym.st_name)
+            && name.ends_with("_chk")
+            && name.starts_with("__")
+        {
+            let s = name.to_string();
+            if !fortified.contains(&s) {
+                fortified.push(s);
+            }
+        }
+    }
+
+    if fortified.is_empty() {
+        return (false, fortified, None);
+    }
+
+    // Infer level: presence of any level-2-specific symbol suggests level 2.
+    let level = if fortified
+        .iter()
+        .any(|f| FORTIFY_LEVEL2_SYMS.contains(&f.as_str()))
+    {
+        Some(2u8)
+    } else {
+        Some(1u8)
+    };
+
+    (true, fortified, level)
 }
 
 /// DWARF section names to look for
@@ -243,7 +341,7 @@ pub fn check_elf(elf: &Elf) -> ElfCheckResult {
     let stack_canary = check_stack_canary(elf);
     let nx = check_nx(elf);
     let pie = check_pie(elf);
-    let (fortify_source, fortified_functions) = check_fortify(elf);
+    let (fortify_source, fortified_functions, fortify_level) = check_fortify(elf);
     let (rpath, runpath) = check_rpath_runpath(elf);
     let debug_info = check_debug_info(elf);
 
@@ -254,6 +352,7 @@ pub fn check_elf(elf: &Elf) -> ElfCheckResult {
         pie,
         fortify_source,
         fortified_functions,
+        fortify_level,
         rpath,
         runpath,
         debug_info,
@@ -345,13 +444,28 @@ mod tests {
     // ---- NX check ----
 
     #[test]
-    fn nx_false_when_no_gnu_stack() {
-        // Minimal ELF with no program headers -> no GNU_STACK -> NX = false
-        let bytes = minimal_elf_exec();
+    fn nx_true_when_no_gnu_stack_x86_64() {
+        // Minimal x86_64 ELF with no program headers -> no GNU_STACK.
+        // x86_64 defaults to NX enabled, so result should be true.
+        let bytes = minimal_elf_exec(); // e_machine = EM_X86_64 (0x3E)
+        let result = parse_and_check(&bytes).expect("should parse as ELF");
+        assert!(
+            result.nx,
+            "x86_64 without GNU_STACK should still report NX enabled"
+        );
+    }
+
+    #[test]
+    fn nx_false_when_no_gnu_stack_unknown_arch() {
+        // Minimal ELF with EM_NONE (unknown arch) -> no GNU_STACK -> NX = false
+        let mut bytes = minimal_elf_exec();
+        // e_machine = EM_NONE (0x00)
+        bytes[18] = 0x00;
+        bytes[19] = 0x00;
         let result = parse_and_check(&bytes).expect("should parse as ELF");
         assert!(
             !result.nx,
-            "No GNU_STACK segment means NX is not explicitly set"
+            "Unknown arch without GNU_STACK should report NX disabled (conservative)"
         );
     }
 
@@ -461,6 +575,7 @@ mod tests {
             pie: true,
             fortify_source: true,
             fortified_functions: vec!["__printf_chk".to_string()],
+            fortify_level: Some(2),
             rpath: None,
             runpath: None,
             debug_info: no_debug_info(),
@@ -477,6 +592,7 @@ mod tests {
             pie: true,
             fortify_source: true,
             fortified_functions: vec![],
+            fortify_level: None,
             rpath: None,
             runpath: None,
             debug_info: no_debug_info(),
@@ -494,6 +610,7 @@ mod tests {
             pie: true,
             fortify_source: false,
             fortified_functions: vec![],
+            fortify_level: None,
             rpath: None,
             runpath: None,
             debug_info: no_debug_info(),
@@ -510,6 +627,7 @@ mod tests {
             pie: true,
             fortify_source: false,
             fortified_functions: vec![],
+            fortify_level: None,
             rpath: None,
             runpath: None,
             debug_info: no_debug_info(),
@@ -526,6 +644,7 @@ mod tests {
             pie: true,
             fortify_source: false,
             fortified_functions: vec![],
+            fortify_level: None,
             rpath: None,
             runpath: None,
             debug_info: no_debug_info(),
@@ -542,6 +661,7 @@ mod tests {
             pie: false,
             fortify_source: false,
             fortified_functions: vec![],
+            fortify_level: None,
             rpath: None,
             runpath: None,
             debug_info: no_debug_info(),
@@ -558,6 +678,7 @@ mod tests {
             pie: true,
             fortify_source: false,
             fortified_functions: vec![],
+            fortify_level: None,
             rpath: Some("/usr/lib".to_string()),
             runpath: None,
             debug_info: no_debug_info(),
@@ -574,11 +695,113 @@ mod tests {
             pie: true,
             fortify_source: false,
             fortified_functions: vec![],
+            fortify_level: None,
             rpath: None,
             runpath: Some("/opt/lib".to_string()),
             debug_info: no_debug_info(),
         };
         assert!(result.has_failures());
+    }
+
+    // ---- P2-4: $ORIGIN rpath/runpath is not a failure ----
+
+    #[test]
+    fn has_failures_rpath_origin_only_not_failure() {
+        let result = ElfCheckResult {
+            relro: RelroStatus::Full,
+            stack_canary: true,
+            nx: true,
+            pie: true,
+            fortify_source: false,
+            fortified_functions: vec![],
+            fortify_level: None,
+            rpath: Some("$ORIGIN".to_string()),
+            runpath: None,
+            debug_info: no_debug_info(),
+        };
+        assert!(
+            !result.has_failures(),
+            "$ORIGIN rpath should not be a failure"
+        );
+    }
+
+    #[test]
+    fn has_failures_rpath_origin_subdir_not_failure() {
+        let result = ElfCheckResult {
+            relro: RelroStatus::Full,
+            stack_canary: true,
+            nx: true,
+            pie: true,
+            fortify_source: false,
+            fortified_functions: vec![],
+            fortify_level: None,
+            rpath: Some("$ORIGIN/lib".to_string()),
+            runpath: None,
+            debug_info: no_debug_info(),
+        };
+        assert!(
+            !result.has_failures(),
+            "$ORIGIN/lib rpath should not be a failure"
+        );
+    }
+
+    #[test]
+    fn has_failures_runpath_origin_not_failure() {
+        let result = ElfCheckResult {
+            relro: RelroStatus::Full,
+            stack_canary: true,
+            nx: true,
+            pie: true,
+            fortify_source: false,
+            fortified_functions: vec![],
+            fortify_level: None,
+            rpath: None,
+            runpath: Some("$ORIGIN".to_string()),
+            debug_info: no_debug_info(),
+        };
+        assert!(
+            !result.has_failures(),
+            "$ORIGIN runpath should not be a failure"
+        );
+    }
+
+    #[test]
+    fn has_failures_rpath_non_origin_absolute_is_failure() {
+        let result = ElfCheckResult {
+            relro: RelroStatus::Full,
+            stack_canary: true,
+            nx: true,
+            pie: true,
+            fortify_source: false,
+            fortified_functions: vec![],
+            fortify_level: None,
+            rpath: Some("/usr/local/lib".to_string()),
+            runpath: None,
+            debug_info: no_debug_info(),
+        };
+        assert!(
+            result.has_failures(),
+            "Absolute rpath should still be a failure"
+        );
+    }
+
+    // ---- P2-1: fortify_level inference ----
+
+    #[test]
+    fn fortify_level_none_when_no_fortify() {
+        let bytes = minimal_elf_exec();
+        let result = parse_and_check(&bytes).expect("should parse as ELF");
+        assert!(result.fortify_level.is_none());
+    }
+
+    #[test]
+    fn is_origin_relative_variants() {
+        assert!(super::is_origin_relative("$ORIGIN"));
+        assert!(super::is_origin_relative("$ORIGIN/lib"));
+        assert!(super::is_origin_relative("$ORIGIN/../lib"));
+        assert!(!super::is_origin_relative("/usr/lib"));
+        assert!(!super::is_origin_relative("$ORIGIN_EXTRA"));
+        assert!(!super::is_origin_relative(""));
     }
 
     // ---- Test with real system binary (integration-style, only on Linux) ----

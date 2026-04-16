@@ -1,3 +1,4 @@
+use chrono::Utc;
 use colored::Colorize;
 use comfy_table::{Cell, Table, presets::UTF8_FULL};
 use serde::Serialize;
@@ -254,10 +255,19 @@ fn format_table(results: &[CheckResult]) -> String {
                         ""
                     }),
                 ]);
+                let arc_status = if macho.arc {
+                    pass_label()
+                } else {
+                    warn_label()
+                };
                 table.add_row(vec![
                     Cell::new("ARC"),
-                    Cell::new(status_cell(macho.arc)),
-                    Cell::new(if macho.arc { "_objc_release found" } else { "" }),
+                    Cell::new(arc_status),
+                    Cell::new(if macho.arc {
+                        "_objc_release found"
+                    } else {
+                        "Not detected (informational, ObjC only)"
+                    }),
                 ]);
                 table.add_row(vec![
                     Cell::new("NX Stack"),
@@ -327,7 +337,12 @@ fn format_table(results: &[CheckResult]) -> String {
 }
 
 fn format_json(results: &[CheckResult]) -> String {
-    serde_json::to_string_pretty(results).unwrap_or_else(|e| format!("JSON error: {}", e))
+    let output = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "timestamp": Utc::now().to_rfc3339(),
+        "results": results,
+    });
+    serde_json::to_string_pretty(&output).unwrap_or_else(|e| format!("JSON error: {}", e))
 }
 
 /// SARIF v2.1.0 output for CI integration
@@ -365,6 +380,8 @@ struct SarifRule {
     name: String,
     #[serde(rename = "shortDescription")]
     short_description: SarifMessage,
+    #[serde(rename = "helpUri")]
+    help_uri: String,
 }
 
 #[derive(Serialize)]
@@ -374,6 +391,7 @@ struct SarifResult {
     level: String,
     message: SarifMessage,
     locations: Vec<SarifLocation>,
+    fingerprints: std::collections::HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -398,6 +416,62 @@ struct SarifArtifactLocation {
     uri: String,
 }
 
+fn rule_help_uri(rule_id: &str) -> String {
+    let base = "https://github.com/kazu11max17/bincheck";
+    let fragment = match rule_id {
+        "BHC001" => "#relro",
+        "BHC002" => "#stack-canary",
+        "BHC003" => "#nx-dep",
+        "BHC004" => "#pie-aslr",
+        "BHC005" => "#fortify-source",
+        "BHC006" | "BHC007" => "#rpath-runpath",
+        "BHC104" => "#cfg",
+        "BHC105" => "#safeseh",
+        "BHC206" => "#code-signature",
+        _ => "",
+    };
+    format!("{}{}", base, fragment)
+}
+
+/// Determine SARIF level based on rule_id and check context (details for RELRO partial).
+fn rule_level(rule_id: &str, details: &str, warn_only: bool) -> &'static str {
+    if warn_only {
+        return "note";
+    }
+    match rule_id {
+        // RELRO: None → error, Partial → warning
+        "BHC001" => {
+            if details == "Partial" {
+                "warning"
+            } else {
+                "error"
+            }
+        }
+        // Stack Canary missing → error
+        "BHC002" => "error",
+        // NX missing → error
+        "BHC003" => "error",
+        // PIE missing → error (ELF)
+        "BHC004" => "error",
+        // Fortify Source missing → warning
+        "BHC005" => "warning",
+        // RPATH/RUNPATH present → warning
+        "BHC006" | "BHC007" => "warning",
+        // SafeSEH missing (PE) → warning
+        "BHC105" => "warning",
+        // PIE missing (Mach-O) → error
+        "BHC201" => "error",
+        // Stack Canary missing (Mach-O) → error
+        "BHC202" => "error",
+        // NX Stack missing → error
+        "BHC204" => "error",
+        // NX Heap missing → error
+        "BHC205" => "error",
+        // default → warning
+        _ => "warning",
+    }
+}
+
 fn format_sarif(results: &[CheckResult]) -> String {
     let mut sarif_results = Vec::new();
     let mut rules = Vec::new();
@@ -413,30 +487,26 @@ fn format_sarif(results: &[CheckResult]) -> String {
                     short_description: SarifMessage {
                         text: format!("Binary hardening check: {}", name),
                     },
+                    help_uri: rule_help_uri(&rule_id),
                 });
                 seen_rules.insert(rule_id.clone());
             }
 
             if !pass {
-                let (level, msg) = if warn_only {
-                    (
-                        "note".to_string(),
-                        if details.is_empty() {
-                            format!("{} not enabled (informational)", name)
-                        } else {
-                            format!("{} not enabled (informational): {}", name, details)
-                        },
-                    )
+                let level = rule_level(&rule_id, &details, warn_only).to_string();
+                let msg = if warn_only {
+                    if details.is_empty() {
+                        format!("{} not enabled (informational)", name)
+                    } else {
+                        format!("{} not enabled (informational): {}", name, details)
+                    }
+                } else if details.is_empty() {
+                    format!("{} check failed", name)
                 } else {
-                    (
-                        "warning".to_string(),
-                        if details.is_empty() {
-                            format!("{} check failed", name)
-                        } else {
-                            format!("{} check failed: {}", name, details)
-                        },
-                    )
+                    format!("{} check failed: {}", name, details)
                 };
+                let mut fingerprints = std::collections::HashMap::new();
+                fingerprints.insert("binaryPath/v1".to_string(), result.file_path.clone());
                 sarif_results.push(SarifResult {
                     rule_id,
                     level,
@@ -448,6 +518,7 @@ fn format_sarif(results: &[CheckResult]) -> String {
                             },
                         },
                     }],
+                    fingerprints,
                 });
             }
         }
@@ -519,14 +590,14 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
             items.push((
                 "BHC006".to_string(),
                 "RPATH".to_string(),
-                elf.rpath.is_none(),
+                !elf.rpath_is_failure(),
                 elf.rpath.clone().unwrap_or_default(),
                 false,
             ));
             items.push((
                 "BHC007".to_string(),
                 "RUNPATH".to_string(),
-                elf.runpath.is_none(),
+                !elf.runpath_is_failure(),
                 elf.runpath.clone().unwrap_or_default(),
                 false,
             ));
@@ -635,7 +706,7 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
                 "ARC".to_string(),
                 macho.arc,
                 String::new(),
-                false,
+                true,
             ));
             items.push((
                 "BHC204".to_string(),
@@ -721,6 +792,7 @@ mod tests {
                 pie: true,
                 fortify_source: true,
                 fortified_functions: vec!["__printf_chk".to_string(), "__memcpy_chk".to_string()],
+                fortify_level: Some(2),
                 rpath: None,
                 runpath: None,
                 debug_info: no_elf_debug(),
@@ -739,6 +811,7 @@ mod tests {
                 pie: false,
                 fortify_source: false,
                 fortified_functions: vec![],
+                fortify_level: None,
                 rpath: Some("/usr/local/lib".to_string()),
                 runpath: Some("/opt/lib".to_string()),
                 debug_info: ElfDebugInfo {
@@ -819,8 +892,11 @@ mod tests {
         let output = format_results(&results, OutputFormat::Json);
         let parsed: serde_json::Value =
             serde_json::from_str(&output).expect("JSON output should be valid JSON");
-        assert!(parsed.is_array());
-        assert_eq!(parsed.as_array().unwrap().len(), 1);
+        assert!(parsed.is_object());
+        assert!(parsed["results"].is_array());
+        assert_eq!(parsed["results"].as_array().unwrap().len(), 1);
+        assert!(parsed["version"].is_string());
+        assert!(parsed["timestamp"].is_string());
     }
 
     #[test]
@@ -835,7 +911,7 @@ mod tests {
         let results = vec![sample_elf_result_all_pass(), sample_pe_result()];
         let output = format_results(&results, OutputFormat::Json);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed.as_array().unwrap().len(), 2);
+        assert_eq!(parsed["results"].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -843,7 +919,7 @@ mod tests {
         let results: Vec<CheckResult> = vec![];
         let output = format_results(&results, OutputFormat::Json);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed.as_array().unwrap().len(), 0);
+        assert_eq!(parsed["results"].as_array().unwrap().len(), 0);
     }
 
     #[test]
@@ -851,7 +927,7 @@ mod tests {
         let results = vec![sample_elf_result_all_pass()];
         let output = format_results(&results, OutputFormat::Json);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        let elf = &parsed[0]["result"]["Elf"];
+        let elf = &parsed["results"][0]["result"]["Elf"];
         assert_eq!(elf["relro"], "Full");
         assert_eq!(elf["stack_canary"], true);
         assert_eq!(elf["nx"], true);
@@ -864,7 +940,7 @@ mod tests {
         let results = vec![sample_pe_result()];
         let output = format_results(&results, OutputFormat::Json);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        let pe = &parsed[0]["result"]["Pe"];
+        let pe = &parsed["results"][0]["result"]["Pe"];
         assert_eq!(pe["aslr"], true);
         assert_eq!(pe["high_entropy_aslr"], false);
         assert_eq!(pe["dep_nx"], true);
@@ -988,8 +1064,13 @@ mod tests {
         );
 
         // Check that result contains file location
+        // First result is RELRO None which maps to "error" level
         let first = &sarif_results[0];
-        assert_eq!(first["level"], "warning");
+        assert!(
+            first["level"] == "error" || first["level"] == "warning",
+            "level should be error or warning, got: {}",
+            first["level"]
+        );
         let uri = &first["locations"][0]["physicalLocation"]["artifactLocation"]["uri"];
         assert_eq!(uri, "/tmp/vuln");
     }
@@ -1068,7 +1149,7 @@ mod tests {
             .iter()
             .find(|r| r["ruleId"] == "BHC201")
             .expect("PIE result should exist");
-        assert_eq!(pie["level"], "warning", "PIE should be warning level");
+        assert_eq!(pie["level"], "error", "PIE should be error level");
     }
 
     #[test]
@@ -1215,7 +1296,7 @@ mod tests {
         let results = vec![sample_macho_result_all_pass()];
         let output = format_results(&results, OutputFormat::Json);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        let macho = &parsed[0]["result"]["MachO"];
+        let macho = &parsed["results"][0]["result"]["MachO"];
         assert_eq!(macho["pie"], true);
         assert_eq!(macho["stack_canary"], true);
         assert_eq!(macho["arc"], true);

@@ -137,6 +137,7 @@ mod tests {
             pie: true,
             fortify_source: false,
             fortified_functions: vec![],
+            fortify_level: None,
             rpath: None,
             runpath: None,
             debug_info: ElfDebugInfo {
@@ -298,6 +299,7 @@ mod tests {
                 pie: true,
                 fortify_source: false,
                 fortified_functions: vec![],
+                fortify_level: None,
                 rpath: None,
                 runpath: None,
                 debug_info: ElfDebugInfo {
