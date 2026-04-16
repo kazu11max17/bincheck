@@ -1,6 +1,6 @@
 [package]
 name = "bincheck"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 description = "Fast binary security property checker for ELF, PE, and Mach-O files"
 license = "Apache-2.0"
