@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/bincheck.svg)](https://crates.io/crates/bincheck)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Fast binary security property checker for ELF and PE files.
+Fast binary security property checker for ELF, PE, and Mach-O files.
 
 Inspect hardening features (RELRO, Stack Canary, NX, PIE, ASLR, DEP, CFG, etc.) in a single command.
 
@@ -88,6 +88,19 @@ File: /usr/bin/ls (ELF)
 | SafeSEH | Structured Exception Handling protection |
 | Authenticode | Code signing (Certificate Table present) |
 
+### Mach-O Binaries (macOS)
+
+| Check | What it detects |
+|-------|----------------|
+| PIE | Position Independent Executable (`MH_PIE` flag) |
+| Stack Canary | `__stack_chk_fail` in symbol table |
+| NX Stack | Non-executable stack segment |
+| NX Heap | Non-executable heap segment |
+| Code Signature | Embedded code signature (`LC_CODE_SIGNATURE`) |
+| Hardened Runtime | Hardened runtime enabled (`CS_RUNTIME` flag) |
+| ARC | Automatic Reference Counting (`_objc_release` present) — memory management aid, reduces use-after-free risk |
+| Restrict Segment | `__RESTRICT,__restrict` segment present (legacy dyld injection guard; superseded by Hardened Runtime on modern macOS) |
+
 ## Output Formats
 
 - **table** (default) — Color-coded terminal output
@@ -97,7 +110,7 @@ File: /usr/bin/ls (ELF)
 ## GitHub Action
 
 ```yaml
-- uses: kazu11max17/bincheck@v0.1.0
+- uses: kazu11max17/bincheck@v0.2.0
   with:
     files: target/release/myapp
 ```
@@ -105,7 +118,7 @@ File: /usr/bin/ls (ELF)
 With SARIF upload to GitHub Code Scanning:
 
 ```yaml
-- uses: kazu11max17/bincheck@v0.1.0
+- uses: kazu11max17/bincheck@v0.2.0
   with:
     files: target/release/myapp
     format: sarif
@@ -127,6 +140,10 @@ With SARIF upload to GitHub Code Scanning:
 - **Firmware audits**: Check embedded Linux binaries for missing protections
 - **Supply chain security**: Verify third-party binaries before deployment
 - **Compliance**: Document security properties for regulatory requirements
+
+## Roadmap
+
+- **Embedded Linux ELF** — extended checks for uclibc/musl-based binaries common in embedded Linux firmware
 
 ## License
 
