@@ -24,15 +24,15 @@ pub fn format_results(results: &[CheckResult], format: OutputFormat) -> String {
 }
 
 fn pass_label() -> String {
-    format!("{} Pass", "\u{2713}".green())
+    "PASS".green().to_string()
 }
 
 fn fail_label() -> String {
-    format!("{} Fail", "\u{2717}".red())
+    "FAIL".red().to_string()
 }
 
 fn warn_label() -> String {
-    format!("{} Warn", "!".yellow())
+    "WARN".yellow().to_string()
 }
 
 fn status_cell(pass: bool) -> String {
@@ -165,7 +165,7 @@ fn format_table(results: &[CheckResult]) -> String {
                 if let Some(ref _build_id) = elf.debug_info.build_id {
                     table.add_row(vec![
                         Cell::new("Build ID"),
-                        Cell::new(format!("{} Info", "i".cyan())),
+                        Cell::new("INFO".cyan().to_string()),
                         Cell::new(".note.gnu.build-id present"),
                     ]);
                 }

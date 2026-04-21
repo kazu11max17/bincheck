@@ -48,19 +48,19 @@ File: /usr/bin/ls (ELF)
 ┌────────────────┬────────┬──────────────────────┐
 │ Property       ┆ Status ┆ Details              │
 ╞════════════════╪════════╪══════════════════════╡
-│ RELRO          ┆ ✓ Pass ┆ Full                 │
+│ RELRO          ┆ PASS   ┆ Full                 │
 ├────────────────┼────────┼──────────────────────┤
-│ Stack Canary   ┆ ✓ Pass ┆ __stack_chk_fail     │
+│ Stack Canary   ┆ PASS   ┆ __stack_chk_fail     │
 ├────────────────┼────────┼──────────────────────┤
-│ NX             ┆ ✓ Pass ┆ Stack not executable │
+│ NX             ┆ PASS   ┆ Stack not executable │
 ├────────────────┼────────┼──────────────────────┤
-│ PIE            ┆ ✓ Pass ┆ ET_DYN               │
+│ PIE            ┆ PASS   ┆ ET_DYN               │
 ├────────────────┼────────┼──────────────────────┤
-│ Fortify Source ┆ ✓ Pass ┆ __printf_chk          │
+│ Fortify Source ┆ PASS   ┆ __printf_chk         │
 ├────────────────┼────────┼──────────────────────┤
-│ RPATH          ┆ ✓ Pass ┆ Not set              │
+│ RPATH          ┆ PASS   ┆ Not set              │
 ├────────────────┼────────┼──────────────────────┤
-│ RUNPATH        ┆ ✓ Pass ┆ Not set              │
+│ RUNPATH        ┆ PASS   ┆ Not set              │
 └────────────────┴────────┴──────────────────────┘
 ```
 
