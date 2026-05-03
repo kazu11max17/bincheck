@@ -1,11 +1,36 @@
 use goblin::elf::Elf;
-use goblin::elf::dynamic::{DF_1_NOW, DF_BIND_NOW, DT_RPATH, DT_RUNPATH};
-use goblin::elf::program_header::{PF_X, PT_GNU_RELRO, PT_GNU_STACK};
+use goblin::elf::dynamic::{DF_1_NOW, DF_1_PIE, DF_BIND_NOW, DT_NEEDED, DT_RPATH, DT_RUNPATH};
+use goblin::elf::header::{ET_DYN, ET_EXEC};
+use goblin::elf::program_header::{PF_X, PT_DYNAMIC, PT_GNU_RELRO, PT_GNU_STACK, PT_INTERP};
 use serde::Serialize;
 
 // ELF e_machine constants (not publicly exported by goblin)
 const EM_X86_64: u16 = 62;
 const EM_AARCH64: u16 = 183;
+
+/// Linkage classification (F4 / BHC013).
+///
+/// Distinguishes a fully static `-static` build (`ET_EXEC`, no `PT_INTERP`) from
+/// a `-static-pie` build (`ET_DYN` with no `PT_INTERP` and no `DT_NEEDED`).
+/// Dynamic PIE and dynamic non-PIE both map to `Dynamic`; `pie` is reported
+/// independently in `ElfCheckResult::pie`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Linkage {
+    Dynamic,
+    Static,
+    StaticPie,
+}
+
+impl std::fmt::Display for Linkage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Linkage::Dynamic => write!(f, "dynamic"),
+            Linkage::Static => write!(f, "static"),
+            Linkage::StaticPie => write!(f, "static-pie"),
+        }
+    }
+}
 
 /// RELRO protection level
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -61,6 +86,15 @@ pub struct ElfCheckResult {
     pub fortify_level: Option<u8>,
     pub rpath: Option<String>,
     pub runpath: Option<String>,
+    /// F4 / BHC013: distinguish static, static-pie and dynamic linkage.
+    /// `Option<_>` so older JSON consumers that did not expect this field stay unaffected
+    /// (`skip_serializing_if`). `None` means we could not determine linkage robustly
+    /// (e.g. malformed ELF with `ET_DYN` but no `PT_DYNAMIC`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linkage: Option<Linkage>,
+    /// True when `DT_FLAGS_1 & DF_1_PIE` is observed. Treated as a confirming signal
+    /// for `Linkage::StaticPie` / dynamic PIE; absence does not invalidate the heuristic.
+    pub df_1_pie: bool,
     pub debug_info: ElfDebugInfo,
 }
 
@@ -178,7 +212,55 @@ fn check_nx(elf: &Elf) -> bool {
 fn check_pie(elf: &Elf) -> bool {
     // ET_DYN (3) = shared object / PIE
     // ET_EXEC (2) = fixed address executable
-    elf.header.e_type == goblin::elf::header::ET_DYN
+    elf.header.e_type == ET_DYN
+}
+
+/// F4 (BHC013): classify linkage as `dynamic` / `static` / `static-pie`.
+///
+/// Returns `(linkage, df_1_pie)`.
+///
+/// Heuristic (multi-condition AND for `static-pie` to avoid misclassifying a plain `.so`):
+/// - `Dynamic`: `PT_INTERP` is present, OR `ET_EXEC` with `DT_NEEDED` entries.
+/// - `Static`: `ET_EXEC` and no `PT_INTERP` and no `DT_NEEDED`.
+/// - `StaticPie`: `ET_DYN` and no `PT_INTERP` and no `DT_NEEDED` and
+///   `e_entry != 0` and `PT_DYNAMIC` is present.
+/// - `None` (unknown): `ET_DYN` without `PT_INTERP` but `PT_DYNAMIC` missing
+///   (likely a malformed binary or a shared library; bincheck does not classify libraries here).
+///
+/// `DF_1_PIE` (`DT_FLAGS_1`) is observed independently and surfaced as a
+/// confirming signal for the `static-pie` and dynamic PIE cases. Its absence does
+/// not flip the classification because not every linker emits it.
+fn check_linkage(elf: &Elf) -> (Option<Linkage>, bool) {
+    let has_interp = elf.program_headers.iter().any(|ph| ph.p_type == PT_INTERP);
+    let has_dynamic_seg = elf.program_headers.iter().any(|ph| ph.p_type == PT_DYNAMIC);
+    let has_needed = elf
+        .dynamic
+        .as_ref()
+        .map(|d| d.dyns.iter().any(|x| x.d_tag == DT_NEEDED))
+        .unwrap_or(false);
+    let df_1_pie = elf
+        .dynamic
+        .as_ref()
+        .map(|d| {
+            d.dyns
+                .iter()
+                .any(|x| x.d_tag == goblin::elf::dynamic::DT_FLAGS_1 && (x.d_val & DF_1_PIE) != 0)
+        })
+        .unwrap_or(false);
+    let e_entry = elf.header.e_entry;
+    let e_type = elf.header.e_type;
+
+    let linkage = match e_type {
+        ET_DYN if has_interp => Some(Linkage::Dynamic),
+        ET_DYN if !has_needed && e_entry != 0 && has_dynamic_seg => Some(Linkage::StaticPie),
+        ET_DYN => None, // ET_DYN with PT_DYNAMIC missing or DT_NEEDED present without PT_INTERP: unclassifiable
+        ET_EXEC if has_interp => Some(Linkage::Dynamic),
+        ET_EXEC if has_needed => Some(Linkage::Dynamic),
+        ET_EXEC => Some(Linkage::Static),
+        _ => None,
+    };
+
+    (linkage, df_1_pie)
 }
 
 /// Format-string checking functions that are only introduced by `-D_FORTIFY_SOURCE=2`.
@@ -343,6 +425,7 @@ pub fn check_elf(elf: &Elf) -> ElfCheckResult {
     let pie = check_pie(elf);
     let (fortify_source, fortified_functions, fortify_level) = check_fortify(elf);
     let (rpath, runpath) = check_rpath_runpath(elf);
+    let (linkage, df_1_pie) = check_linkage(elf);
     let debug_info = check_debug_info(elf);
 
     ElfCheckResult {
@@ -355,6 +438,8 @@ pub fn check_elf(elf: &Elf) -> ElfCheckResult {
         fortify_level,
         rpath,
         runpath,
+        linkage,
+        df_1_pie,
         debug_info,
     }
 }
@@ -578,6 +663,8 @@ mod tests {
             fortify_level: Some(2),
             rpath: None,
             runpath: None,
+            linkage: None,
+            df_1_pie: false,
             debug_info: no_debug_info(),
         };
         assert!(!result.has_failures());
@@ -595,6 +682,8 @@ mod tests {
             fortify_level: None,
             rpath: None,
             runpath: None,
+            linkage: None,
+            df_1_pie: false,
             debug_info: no_debug_info(),
         };
         assert!(result.has_failures());
@@ -613,6 +702,8 @@ mod tests {
             fortify_level: None,
             rpath: None,
             runpath: None,
+            linkage: None,
+            df_1_pie: false,
             debug_info: no_debug_info(),
         };
         assert!(!result.has_failures());
@@ -630,6 +721,8 @@ mod tests {
             fortify_level: None,
             rpath: None,
             runpath: None,
+            linkage: None,
+            df_1_pie: false,
             debug_info: no_debug_info(),
         };
         assert!(result.has_failures());
@@ -647,6 +740,8 @@ mod tests {
             fortify_level: None,
             rpath: None,
             runpath: None,
+            linkage: None,
+            df_1_pie: false,
             debug_info: no_debug_info(),
         };
         assert!(result.has_failures());
@@ -664,6 +759,8 @@ mod tests {
             fortify_level: None,
             rpath: None,
             runpath: None,
+            linkage: None,
+            df_1_pie: false,
             debug_info: no_debug_info(),
         };
         assert!(result.has_failures());
@@ -681,6 +778,8 @@ mod tests {
             fortify_level: None,
             rpath: Some("/usr/lib".to_string()),
             runpath: None,
+            linkage: None,
+            df_1_pie: false,
             debug_info: no_debug_info(),
         };
         assert!(result.has_failures());
@@ -698,6 +797,8 @@ mod tests {
             fortify_level: None,
             rpath: None,
             runpath: Some("/opt/lib".to_string()),
+            linkage: None,
+            df_1_pie: false,
             debug_info: no_debug_info(),
         };
         assert!(result.has_failures());
@@ -717,6 +818,8 @@ mod tests {
             fortify_level: None,
             rpath: Some("$ORIGIN".to_string()),
             runpath: None,
+            linkage: None,
+            df_1_pie: false,
             debug_info: no_debug_info(),
         };
         assert!(
@@ -737,6 +840,8 @@ mod tests {
             fortify_level: None,
             rpath: Some("$ORIGIN/lib".to_string()),
             runpath: None,
+            linkage: None,
+            df_1_pie: false,
             debug_info: no_debug_info(),
         };
         assert!(
@@ -757,6 +862,8 @@ mod tests {
             fortify_level: None,
             rpath: None,
             runpath: Some("$ORIGIN".to_string()),
+            linkage: None,
+            df_1_pie: false,
             debug_info: no_debug_info(),
         };
         assert!(
@@ -777,6 +884,8 @@ mod tests {
             fortify_level: None,
             rpath: Some("/usr/local/lib".to_string()),
             runpath: None,
+            linkage: None,
+            df_1_pie: false,
             debug_info: no_debug_info(),
         };
         assert!(
@@ -792,6 +901,170 @@ mod tests {
         let bytes = minimal_elf_exec();
         let result = parse_and_check(&bytes).expect("should parse as ELF");
         assert!(result.fortify_level.is_none());
+    }
+
+    /// Build a synthetic 64-bit ELF that satisfies the `static-pie` heuristic:
+    /// `ET_DYN` + `PT_DYNAMIC` present + `e_entry != 0` + no `PT_INTERP` +
+    /// no `DT_NEEDED`. Used by `linkage_static_pie_synthetic_elf` (Ren P0-2).
+    ///
+    /// Layout:
+    /// - [0..64)   ELF64 header
+    /// - [64..120) one program header (PT_DYNAMIC)
+    /// - [120..136) dynamic table: a single `DT_NULL` (16 zero bytes)
+    fn minimal_elf_static_pie() -> Vec<u8> {
+        let mut buf = vec![0u8; 256];
+        // ELF magic + ident
+        buf[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        buf[4] = 2; // ELFCLASS64
+        buf[5] = 1; // ELFDATA2LSB
+        buf[6] = 1; // EI_VERSION
+        buf[7] = 0; // ELFOSABI_NONE
+        // e_type = ET_DYN
+        buf[16] = 3;
+        // e_machine = EM_X86_64
+        buf[18] = 0x3E;
+        // e_version
+        buf[20] = 1;
+        // e_entry = 0x1000 (must be != 0 for the heuristic to fire)
+        buf[24] = 0x00;
+        buf[25] = 0x10;
+        // e_phoff = 64
+        buf[32] = 64;
+        // e_ehsize = 64
+        buf[52] = 64;
+        // e_phentsize = 56, e_phnum = 1
+        buf[54] = 56;
+        buf[56] = 1;
+        // e_shentsize = 64
+        buf[58] = 64;
+
+        // --- Program header at offset 64: PT_DYNAMIC ---
+        // p_type = PT_DYNAMIC (2)
+        buf[64] = 2;
+        // p_flags = PF_R | PF_W = 6
+        buf[68] = 6;
+        // p_offset = 120 (start of dynamic table inside the file)
+        buf[72] = 120;
+        // p_vaddr = 0x2000
+        buf[81] = 0x20;
+        // p_paddr = 0x2000
+        buf[89] = 0x20;
+        // p_filesz = 16 (one DT_NULL entry: 8 bytes d_tag + 8 bytes d_val, all zero)
+        buf[96] = 16;
+        // p_memsz = 16
+        buf[104] = 16;
+        // p_align = 8
+        buf[112] = 8;
+
+        // [120..136) is already zero-initialized → DT_NULL terminator.
+        buf
+    }
+
+    // ---- F4 (BHC013): Linkage classification ----
+
+    #[test]
+    fn linkage_static_pie_synthetic_elf() {
+        let bytes = minimal_elf_static_pie();
+        let result = parse_and_check(&bytes).expect("synthetic static-pie ELF should parse");
+        assert_eq!(
+            result.linkage,
+            Some(Linkage::StaticPie),
+            "ET_DYN + PT_DYNAMIC + e_entry!=0 + no PT_INTERP + no DT_NEEDED → StaticPie"
+        );
+        // pie is also true (ET_DYN), and df_1_pie is false because we did not emit
+        // a DT_FLAGS_1 entry — this is by design: static-pie is asserted by the
+        // multi-condition AND, DF_1_PIE is only a confirming signal.
+        assert!(result.pie);
+        assert!(!result.df_1_pie);
+    }
+
+    #[test]
+    fn linkage_static_for_et_exec_no_interp() {
+        // minimal_elf_exec has ET_EXEC, no PT_INTERP, no DT_NEEDED → static
+        let bytes = minimal_elf_exec();
+        let result = parse_and_check(&bytes).expect("should parse as ELF");
+        assert_eq!(result.linkage, Some(Linkage::Static));
+        assert!(!result.df_1_pie);
+    }
+
+    #[test]
+    fn linkage_unknown_for_minimal_et_dyn_without_dynamic_segment() {
+        // minimal_elf_dyn has ET_DYN but no PT_DYNAMIC and e_entry == 0
+        // → cannot classify as static-pie (heuristic requires PT_DYNAMIC + e_entry != 0)
+        let bytes = minimal_elf_dyn();
+        let result = parse_and_check(&bytes).expect("should parse as ELF");
+        assert_eq!(result.linkage, None);
+    }
+
+    #[test]
+    fn linkage_display_kebab_case() {
+        assert_eq!(Linkage::Dynamic.to_string(), "dynamic");
+        assert_eq!(Linkage::Static.to_string(), "static");
+        assert_eq!(Linkage::StaticPie.to_string(), "static-pie");
+    }
+
+    #[test]
+    fn linkage_serializes_kebab_case() {
+        let json = serde_json::to_string(&Linkage::StaticPie).unwrap();
+        assert_eq!(json, "\"static-pie\"");
+    }
+
+    #[test]
+    fn linkage_field_omitted_when_none() {
+        // Build a result with linkage=None and verify the JSON omits the field
+        let result = ElfCheckResult {
+            relro: RelroStatus::Full,
+            stack_canary: true,
+            nx: true,
+            pie: true,
+            fortify_source: false,
+            fortified_functions: vec![],
+            fortify_level: None,
+            rpath: None,
+            runpath: None,
+            linkage: None,
+            df_1_pie: false,
+            debug_info: no_debug_info(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(
+            !json.contains("\"linkage\""),
+            "linkage field should be omitted when None: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn linkage_field_serialized_when_some() {
+        let result = ElfCheckResult {
+            relro: RelroStatus::Full,
+            stack_canary: true,
+            nx: true,
+            pie: true,
+            fortify_source: false,
+            fortified_functions: vec![],
+            fortify_level: None,
+            rpath: None,
+            runpath: None,
+            linkage: Some(Linkage::StaticPie),
+            df_1_pie: true,
+            debug_info: no_debug_info(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"linkage\":\"static-pie\""));
+        assert!(json.contains("\"df_1_pie\":true"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linkage_dynamic_for_system_ls() {
+        // /bin/ls on Linux is always dynamically linked → expect Some(Dynamic)
+        if let Ok(bytes) = std::fs::read("/bin/ls")
+            && let Ok(Object::Elf(elf)) = Object::parse(&bytes)
+        {
+            let result = check_elf(&elf);
+            assert_eq!(result.linkage, Some(Linkage::Dynamic));
+        }
     }
 
     #[test]

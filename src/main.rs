@@ -73,7 +73,9 @@ fn main() {
     }
 
     if cli.strict {
-        let any_fail = results.iter().any(|r| r.has_failures());
+        // --strict promotes warnings (currently SUID/SGID, BHC011) to exit-1 alongside
+        // the existing failure conditions. Without --strict, SUID/SGID is informational.
+        let any_fail = results.iter().any(|r| r.has_failures() || r.has_warnings());
         if any_fail || has_errors {
             process::exit(1);
         }

@@ -76,6 +76,8 @@ File: /usr/bin/ls (ELF)
 | PIE | Position Independent Executable (ASLR support) |
 | Fortify Source | Fortified libc functions (`__*_chk`) |
 | RPATH/RUNPATH | Hardcoded library search paths (supply chain risk) |
+| Linkage | `dynamic` / `static` / `static-pie` classification (informational) |
+| File Mode (SUID/SGID) | `04000` / `02000` mode bits (informational; `--strict` promotes to failure) |
 
 ### PE Binaries (Windows)
 
@@ -110,7 +112,7 @@ File: /usr/bin/ls (ELF)
 ## GitHub Action
 
 ```yaml
-- uses: kazu11max17/bincheck@v0.2.0
+- uses: kazu11max17/bincheck@v0.3.0
   with:
     files: target/release/myapp
 ```
@@ -118,7 +120,7 @@ File: /usr/bin/ls (ELF)
 With SARIF upload to GitHub Code Scanning:
 
 ```yaml
-- uses: kazu11max17/bincheck@v0.2.0
+- uses: kazu11max17/bincheck@v0.3.0
   with:
     files: target/release/myapp
     format: sarif
@@ -134,6 +136,58 @@ With SARIF upload to GitHub Code Scanning:
 | `version` | bincheck version to install | latest |
 | `sarif-upload` | Upload SARIF to Code Scanning | `false` |
 
+## Check Reference
+
+### SUID-SGID
+
+bincheck reports the SUID (`04000`) and SGID (`02000`) bits of the file passed on
+the command line. Detection happens at the file layer via `symlink_metadata`, so
+the bits reflect the entry the user named — symlinks are reported as `symlink`
+without following them. By default the SUID/SGID row is informational (`WARN` in
+the table, `note` in SARIF). With `--strict`, an SUID or SGID file causes
+bincheck to exit `1` so it can gate a CI pipeline.
+
+The check is Unix-only; on Windows it reports `not_applicable`.
+
+### Static-PIE
+
+bincheck classifies an ELF as one of `dynamic` / `static` / `static-pie`:
+
+- **dynamic** — `PT_INTERP` is present (regular dynamically linked executable).
+- **static** — `ET_EXEC` with no `PT_INTERP` and no `DT_NEEDED`.
+- **static-pie** — `ET_DYN` with no `PT_INTERP`, no `DT_NEEDED`, `e_entry != 0`,
+  and `PT_DYNAMIC` present. `DT_FLAGS_1 & DF_1_PIE` is treated as a confirming
+  signal when emitted by the linker, but its absence does not override the
+  classification (not every toolchain emits it).
+
+Linkage is informational only. The existing `PIE` check still flags the
+underlying `ET_DYN` requirement independently.
+
+## Security Model
+
+bincheck is designed for **CI / build-time inspection of artifacts produced by
+your own pipeline**. The threat model assumes the binary path is under the
+caller's control and the surrounding directory is not attacker-writable.
+
+A few consequences worth being explicit about:
+
+- **TOCTOU on file-mode**: the SUID/SGID check (`symlink_metadata`) and the
+  binary parse (`fs::read`) are two separate syscalls. If the path is in a
+  directory where an attacker can swap entries between those calls, the
+  reported file-mode and the parsed binary contents may not refer to the same
+  inode. Run bincheck against artifacts staged in a directory you own.
+- **PIE is a single-condition check**: the `PIE` row reports `ET_DYN` only.
+  The `Linkage` row applies the multi-condition heuristic for `static-pie`. A
+  hand-crafted ELF with `ET_DYN` set but no `PT_DYNAMIC` will still pass `PIE`
+  while showing `Linkage: unknown`.
+- **No code execution**: bincheck never executes the inspected binary, so
+  malicious payloads inside an inspected artifact are not invoked. Parsing is
+  delegated to [`goblin`](https://crates.io/crates/goblin).
+
+If you need stricter guarantees (e.g. inspecting untrusted uploads), invoke
+bincheck against a path you `mv`-into-place yourself and confirm the result
+applies to that exact inode out-of-band.
+
 ## Use Cases
 
 - **CI/CD pipelines**: Use `--strict --format sarif` to gate releases on binary hardening
@@ -143,7 +197,9 @@ With SARIF upload to GitHub Code Scanning:
 
 ## Roadmap
 
-- **Embedded Linux ELF** — extended checks for uclibc/musl-based binaries common in embedded Linux firmware
+- **v0.3.0** (current) — File Mode (SUID/SGID) detection, Static-PIE / Static / Dynamic linkage classification
+- **v0.3.x** — Banned function detection (`gets`/`strcpy`/`system` etc.), libc flavor identification (glibc/musl/uclibc/bionic)
+- **v0.4.0** — CET / BTI / PAC checks via `NT_GNU_PROPERTY_TYPE_0` (x86_64 IBT/SHSTK, AArch64 BTI/PAC)
 
 ## License
 

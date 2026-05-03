@@ -3,8 +3,8 @@ use colored::Colorize;
 use comfy_table::{Cell, Table, presets::UTF8_FULL};
 use serde::Serialize;
 
-use crate::check::{CheckResult, FormatResult};
-use crate::elf::RelroStatus;
+use crate::check::{CheckResult, FileModeStatus, FormatResult};
+use crate::elf::{Linkage, RelroStatus};
 use crate::pe::SafeSehStatus;
 
 /// Output format selection
@@ -91,10 +91,30 @@ fn format_table(results: &[CheckResult]) -> String {
                         "Stack executable!"
                     }),
                 ]);
+                let pie_details = match (&elf.linkage, elf.pie) {
+                    (Some(Linkage::StaticPie), _) => {
+                        if elf.df_1_pie {
+                            "ET_DYN (static-pie, DF_1_PIE)".to_string()
+                        } else {
+                            "ET_DYN (static-pie)".to_string()
+                        }
+                    }
+                    (_, true) => "ET_DYN".to_string(),
+                    (_, false) => "ET_EXEC".to_string(),
+                };
                 table.add_row(vec![
                     Cell::new("PIE"),
                     Cell::new(status_cell(elf.pie)),
-                    Cell::new(if elf.pie { "ET_DYN" } else { "ET_EXEC" }),
+                    Cell::new(pie_details),
+                ]);
+                let linkage_details = match &elf.linkage {
+                    Some(l) => l.to_string(),
+                    None => "unknown".to_string(),
+                };
+                table.add_row(vec![
+                    Cell::new("Linkage"),
+                    Cell::new("INFO".cyan().to_string()),
+                    Cell::new(linkage_details),
                 ]);
                 table.add_row(vec![
                     Cell::new("Fortify Source"),
@@ -329,6 +349,27 @@ fn format_table(results: &[CheckResult]) -> String {
             }
         }
 
+        // F2 (BHC011): file-level SUID/SGID row, appended for all formats so the
+        // user always sees the bit they may have set unintentionally.
+        if let Some(fm) = &result.file_mode {
+            let (status_label, details) = match fm.status {
+                FileModeStatus::Normal => (pass_label(), "no SUID/SGID".to_string()),
+                FileModeStatus::Suid => (warn_label(), "SUID set (04000)".to_string()),
+                FileModeStatus::Sgid => (warn_label(), "SGID set (02000)".to_string()),
+                FileModeStatus::SuidSgid => (warn_label(), "SUID + SGID set (06000)".to_string()),
+                FileModeStatus::Symlink => ("INFO".cyan().to_string(), "symlink".to_string()),
+                FileModeStatus::NotApplicable => (
+                    "N/A".dimmed().to_string(),
+                    "platform-not-supported".to_string(),
+                ),
+            };
+            table.add_row(vec![
+                Cell::new("File Mode"),
+                Cell::new(status_label),
+                Cell::new(details),
+            ]);
+        }
+
         output.push_str(&table.to_string());
         output.push('\n');
     }
@@ -425,6 +466,8 @@ fn rule_help_uri(rule_id: &str) -> String {
         "BHC004" => "#pie-aslr",
         "BHC005" => "#fortify-source",
         "BHC006" | "BHC007" => "#rpath-runpath",
+        "BHC011" => "#suid-sgid",
+        "BHC013" => "#static-pie",
         "BHC104" => "#cfg",
         "BHC105" => "#safeseh",
         "BHC206" => "#code-signature",
@@ -457,6 +500,10 @@ fn rule_level(rule_id: &str, details: &str, warn_only: bool) -> &'static str {
         "BHC005" => "warning",
         // RPATH/RUNPATH present → warning
         "BHC006" | "BHC007" => "warning",
+        // SUID/SGID present → warning (informational; --strict promotes to exit 1)
+        "BHC011" => "warning",
+        // Linkage classification → note (informational only)
+        "BHC013" => "note",
         // SafeSEH missing (PE) → warning
         "BHC105" => "warning",
         // PIE missing (Mach-O) → error
@@ -586,6 +633,20 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
                 elf.fortify_source,
                 String::new(),
                 false,
+            ));
+            // F4 (BHC013): linkage classification — informational, never a failure.
+            // Surfacing it as a SARIF item lets downstream tooling key off the rule_id
+            // even though we always pass=true (warn_only=true → "note" level on emit,
+            // but emit only happens when pass=false; here we just register the rule).
+            items.push((
+                "BHC013".to_string(),
+                "Linkage".to_string(),
+                true,
+                match &elf.linkage {
+                    Some(l) => l.to_string(),
+                    None => "unknown".to_string(),
+                },
+                true,
             ));
             items.push((
                 "BHC006".to_string(),
@@ -755,6 +816,28 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
         }
     }
 
+    // F2 (BHC011): SUID/SGID at the file layer. pass=true on Normal/Symlink/N/A,
+    // pass=false on Suid/Sgid/SuidSgid (warn_only=true so SARIF emits "note" — but
+    // since `--strict` consumes `has_warnings()` separately, this row is purely
+    // SARIF reporting). Symlink and N/A do not emit (pass=true).
+    if let Some(fm) = &result.file_mode {
+        let (pass, details) = match fm.status {
+            FileModeStatus::Normal | FileModeStatus::Symlink | FileModeStatus::NotApplicable => {
+                (true, String::new())
+            }
+            FileModeStatus::Suid => (false, "SUID set (04000)".to_string()),
+            FileModeStatus::Sgid => (false, "SGID set (02000)".to_string()),
+            FileModeStatus::SuidSgid => (false, "SUID + SGID set (06000)".to_string()),
+        };
+        items.push((
+            "BHC011".to_string(),
+            "SUID/SGID".to_string(),
+            pass,
+            details,
+            true,
+        ));
+    }
+
     items
 }
 
@@ -795,8 +878,11 @@ mod tests {
                 fortify_level: Some(2),
                 rpath: None,
                 runpath: None,
+                linkage: None,
+                df_1_pie: false,
                 debug_info: no_elf_debug(),
             }),
+            file_mode: None,
         }
     }
 
@@ -814,6 +900,8 @@ mod tests {
                 fortify_level: None,
                 rpath: Some("/usr/local/lib".to_string()),
                 runpath: Some("/opt/lib".to_string()),
+                linkage: None,
+                df_1_pie: false,
                 debug_info: ElfDebugInfo {
                     dwarf_sections: vec![".debug_info".to_string(), ".debug_line".to_string()],
                     has_symtab: true,
@@ -821,6 +909,7 @@ mod tests {
                     build_id: None,
                 },
             }),
+            file_mode: None,
         }
     }
 
@@ -837,6 +926,7 @@ mod tests {
                 authenticode: false,
                 debug_info: no_pe_debug(),
             }),
+            file_mode: None,
         }
     }
 
@@ -855,6 +945,7 @@ mod tests {
                 hardened_runtime: true,
                 restrict_segment: true,
             }),
+            file_mode: None,
         }
     }
 
@@ -873,6 +964,7 @@ mod tests {
                 hardened_runtime: false,
                 restrict_segment: false,
             }),
+            file_mode: None,
         }
     }
 
@@ -881,6 +973,7 @@ mod tests {
             file_path: "test.bin".to_string(),
             format: BinaryFormat::Unknown,
             result: FormatResult::Unsupported,
+            file_mode: None,
         }
     }
 
@@ -1196,7 +1289,9 @@ mod tests {
     fn collect_check_items_elf_count() {
         let result = sample_elf_result_all_pass();
         let items = collect_check_items(&result);
-        assert_eq!(items.len(), 9, "ELF should produce 9 check items");
+        // 9 existing (RELRO/Canary/NX/PIE/Fortify/RPATH/RUNPATH/Debug/Symtab)
+        // + 1 F4 BHC013 Linkage. file_mode is None in the fixture so no BHC011 row.
+        assert_eq!(items.len(), 10, "ELF should produce 10 check items");
     }
 
     #[test]
