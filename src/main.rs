@@ -1,8 +1,10 @@
+use std::path::PathBuf;
 use std::process;
 
 use clap::Parser;
 
-use bincheck::check::{CheckResult, check_file};
+use bincheck::banned::{default_list, load_from_json, merge};
+use bincheck::check::{CheckOptions, CheckResult, check_file_with_options};
 use bincheck::output::{OutputFormat, format_results};
 
 #[derive(Parser)]
@@ -23,6 +25,17 @@ struct Cli {
     /// Exit with code 1 if any check fails
     #[arg(long)]
     strict: bool,
+
+    /// F1 (BHC010): JSON file with extra banned functions to merge with the
+    /// default list. Format: `[{"name": "foo", "severity": "HIGH|MEDIUM|LOW"}]`.
+    /// Same-name entries override the default severity.
+    #[arg(long, value_name = "FILE")]
+    banned_functions: Option<PathBuf>,
+
+    /// F1 (BHC010): JSON file that **replaces** the default banned list.
+    /// Mutually exclusive with `--banned-functions`. Same format.
+    #[arg(long, value_name = "FILE", conflicts_with = "banned_functions")]
+    banned_functions_replace: Option<PathBuf>,
 }
 
 fn main() {
@@ -35,11 +48,37 @@ fn main() {
         _ => OutputFormat::Table,
     };
 
+    // F1: assemble banned-function list (default + optional overlay or replace).
+    let banned = match (
+        cli.banned_functions.as_ref(),
+        cli.banned_functions_replace.as_ref(),
+    ) {
+        (None, None) => default_list(),
+        (Some(p), None) => match load_from_json(p) {
+            Ok(overlay) => merge(default_list(), overlay),
+            Err(e) => {
+                eprintln!("--banned-functions: {}", e);
+                process::exit(2);
+            }
+        },
+        (None, Some(p)) => match load_from_json(p) {
+            Ok(replacement) => replacement,
+            Err(e) => {
+                eprintln!("--banned-functions-replace: {}", e);
+                process::exit(2);
+            }
+        },
+        (Some(_), Some(_)) => unreachable!("clap conflicts_with should prevent this"),
+    };
+    let opts = CheckOptions {
+        banned_functions: Some(banned),
+    };
+
     let mut results: Vec<CheckResult> = Vec::new();
     let mut has_errors = false;
 
     for path in &cli.files {
-        match check_file(path) {
+        match check_file_with_options(path, &opts) {
             Ok(result) => results.push(result),
             Err(e) => {
                 eprintln!("Error processing {}: {}", path, e);

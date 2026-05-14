@@ -4,6 +4,9 @@ use goblin::elf::header::{ET_DYN, ET_EXEC};
 use goblin::elf::program_header::{PF_X, PT_DYNAMIC, PT_GNU_RELRO, PT_GNU_STACK, PT_INTERP};
 use serde::Serialize;
 
+use crate::banned::{BannedDetection, BannedFunction};
+use crate::libc_flavor::{LibcFlavor, detect_libc_flavor_with_comment};
+
 // ELF e_machine constants (not publicly exported by goblin)
 const EM_X86_64: u16 = 62;
 const EM_AARCH64: u16 = 183;
@@ -96,10 +99,25 @@ pub struct ElfCheckResult {
     /// for `Linkage::StaticPie` / dynamic PIE; absence does not invalidate the heuristic.
     pub df_1_pie: bool,
     pub debug_info: ElfDebugInfo,
+    /// F5 / BHC014: detected libc flavor. `Option<_>` so existing JSON consumers
+    /// stay unaffected. `None` is reserved for callers that bypass the libc detector
+    /// entirely (e.g. legacy `check_elf` without bytes); the detector itself never
+    /// returns `None` — it returns `LibcFlavor::Unknown` or `LibcFlavor::None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub libc_flavor: Option<LibcFlavor>,
+    /// F1 / BHC010: detected banned function imports. Empty / `None` when the
+    /// scan ran but found nothing or was not requested. `Option<_>` for backward
+    /// compatibility with existing JSON consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub banned_functions: Option<Vec<BannedDetection>>,
 }
 
 impl ElfCheckResult {
-    /// Returns true if any security check is in a failing state
+    /// Returns true if any security check is in a failing state.
+    ///
+    /// F1 (BHC010): a banned function with `Severity::High` flips this to
+    /// `true` (matches the SARIF `error` level). MEDIUM/LOW banned hits stay
+    /// in the warning lane and only escalate under `--strict`.
     pub fn has_failures(&self) -> bool {
         self.relro == RelroStatus::None
             || !self.stack_canary
@@ -107,6 +125,28 @@ impl ElfCheckResult {
             || !self.pie
             || self.rpath_is_failure()
             || self.runpath_is_failure()
+            || self.has_high_banned()
+    }
+
+    /// True when at least one detected banned function carries `HIGH` severity.
+    pub fn has_high_banned(&self) -> bool {
+        self.banned_functions.as_ref().is_some_and(|v| {
+            v.iter()
+                .any(|d| d.function.severity == crate::banned::Severity::High)
+        })
+    }
+
+    /// True when at least one detected banned function carries `MEDIUM` or `LOW`
+    /// severity (warning lane; promoted to exit-1 by `--strict`).
+    pub fn has_warn_banned(&self) -> bool {
+        self.banned_functions.as_ref().is_some_and(|v| {
+            v.iter().any(|d| {
+                matches!(
+                    d.function.severity,
+                    crate::banned::Severity::Medium | crate::banned::Severity::Low
+                )
+            })
+        })
     }
 
     /// Returns true if RPATH is set and is NOT a $ORIGIN-relative path (which is acceptable).
@@ -417,8 +457,36 @@ fn check_rpath_runpath(elf: &Elf) -> (Option<String>, Option<String>) {
     (rpath, runpath)
 }
 
-/// Run all security checks on an ELF binary
+/// Run all security checks on an ELF binary.
+///
+/// Convenience entry point that does not have access to the raw file bytes.
+/// `.comment`-based libc detection is therefore disabled; `banned_functions`
+/// is also skipped (callers that want F1 must use [`check_elf_with_bytes`]
+/// or call [`crate::banned::check`] directly).
 pub fn check_elf(elf: &Elf) -> ElfCheckResult {
+    check_elf_inner(elf, None, None)
+}
+
+/// Full-fat entry point with raw ELF bytes (enables `.comment` libc detection)
+/// and an optional banned-function list (enables F1).
+///
+/// Pass `banned = None` to skip F1 entirely (the field will serialize as absent).
+/// Pass `banned = Some(&[])` to record an explicit "scanned, found nothing"
+/// (currently still serialized as absent to keep JSON tidy; callers can read
+/// the empty vec via the typed result).
+pub fn check_elf_with_bytes(
+    elf: &Elf,
+    bytes: &[u8],
+    banned: Option<&[BannedFunction]>,
+) -> ElfCheckResult {
+    check_elf_inner(elf, Some(bytes), banned)
+}
+
+fn check_elf_inner(
+    elf: &Elf,
+    bytes: Option<&[u8]>,
+    banned: Option<&[BannedFunction]>,
+) -> ElfCheckResult {
     let relro = check_relro(elf);
     let stack_canary = check_stack_canary(elf);
     let nx = check_nx(elf);
@@ -427,6 +495,8 @@ pub fn check_elf(elf: &Elf) -> ElfCheckResult {
     let (rpath, runpath) = check_rpath_runpath(elf);
     let (linkage, df_1_pie) = check_linkage(elf);
     let debug_info = check_debug_info(elf);
+    let libc = detect_libc_flavor_with_comment(elf, bytes);
+    let banned_functions = banned.map(|list| crate::banned::check(elf, list, libc));
 
     ElfCheckResult {
         relro,
@@ -441,6 +511,8 @@ pub fn check_elf(elf: &Elf) -> ElfCheckResult {
         linkage,
         df_1_pie,
         debug_info,
+        libc_flavor: Some(libc),
+        banned_functions,
     }
 }
 
@@ -666,6 +738,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         assert!(!result.has_failures());
     }
@@ -685,6 +759,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         assert!(result.has_failures());
     }
@@ -705,6 +781,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         assert!(!result.has_failures());
     }
@@ -724,6 +802,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         assert!(result.has_failures());
     }
@@ -743,6 +823,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         assert!(result.has_failures());
     }
@@ -762,6 +844,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         assert!(result.has_failures());
     }
@@ -781,6 +865,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         assert!(result.has_failures());
     }
@@ -800,6 +886,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         assert!(result.has_failures());
     }
@@ -821,6 +909,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         assert!(
             !result.has_failures(),
@@ -843,6 +933,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         assert!(
             !result.has_failures(),
@@ -865,6 +957,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         assert!(
             !result.has_failures(),
@@ -887,6 +981,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         assert!(
             result.has_failures(),
@@ -1025,6 +1121,8 @@ mod tests {
             linkage: None,
             df_1_pie: false,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(
@@ -1049,6 +1147,8 @@ mod tests {
             linkage: Some(Linkage::StaticPie),
             df_1_pie: true,
             debug_info: no_debug_info(),
+            libc_flavor: None,
+            banned_functions: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"linkage\":\"static-pie\""));

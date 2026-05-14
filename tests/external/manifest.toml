@@ -1,0 +1,100 @@
+# bincheck external verification manifest
+#
+# Used by scripts/verify-external.sh for pre-release manual verification
+# (not part of `cargo test`). The CI fixture suite under tests/fixtures/
+# remains the source of truth for automated regressions; this manifest
+# exists so the CEO can spot-check bincheck output against real-world
+# embedded Linux binaries before each release.
+#
+# Selection criteria (Ada legal review CONDITIONAL APPROVED):
+#   - Direct download from upstream / first-party distribution only
+#   - Single ELF artifacts (no Yocto SDK bundles, no OpenWrt firmware images,
+#     no commercial RTOS, no Android/AOSP artifacts)
+#   - Mix of arch (x86_64 / armv7 / aarch64 / mipsel) and libc (musl / glibc)
+#   - Each artifact < 5 MB to keep CEO bandwidth usage modest
+#   - Exercises F1 (banned function detection) and F5 (libc flavor)
+#
+# `sha256` is intentionally PLACEHOLDER. On the first verification run the
+# CEO pins the actual digest; subsequent runs treat a mismatch as a hard fail.
+
+schema_version = 1
+
+# ---------------------------------------------------------------------------
+# BusyBox multiarch musl-static builds (busybox.net official)
+# Same upstream source compiled for three architectures - lets us confirm
+# F1/F5 detection is arch-independent.
+# ---------------------------------------------------------------------------
+
+[[binary]]
+name = "busybox"
+version = "1.36.1"
+arch = "x86_64-musl"
+description = "BusyBox single-binary UNIX utilities (musl static)"
+upstream_license = "GPL-2.0-only"
+url = "https://busybox.net/downloads/binaries/1.36.1-defconfig-multiarch-musl/busybox-x86_64"
+sha256 = "PLACEHOLDER_FILL_ON_FIRST_RUN"
+expected = "tests/external/expected/busybox-1.36.1-x86_64.json"
+
+[[binary]]
+name = "busybox"
+version = "1.36.1"
+arch = "armv7l-musl"
+description = "BusyBox single-binary UNIX utilities (musl static, armv7l)"
+upstream_license = "GPL-2.0-only"
+url = "https://busybox.net/downloads/binaries/1.36.1-defconfig-multiarch-musl/busybox-armv7l"
+sha256 = "PLACEHOLDER_FILL_ON_FIRST_RUN"
+expected = "tests/external/expected/busybox-1.36.1-armv7l.json"
+
+[[binary]]
+name = "busybox"
+version = "1.36.1"
+arch = "mipsel-musl"
+description = "BusyBox single-binary UNIX utilities (musl static, mipsel)"
+upstream_license = "GPL-2.0-only"
+url = "https://busybox.net/downloads/binaries/1.36.1-defconfig-multiarch-musl/busybox-mipsel"
+sha256 = "PLACEHOLDER_FILL_ON_FIRST_RUN"
+expected = "tests/external/expected/busybox-1.36.1-mipsel.json"
+
+# ---------------------------------------------------------------------------
+# Static curl (musl, aarch64) - stunnel/static-curl GitHub releases
+# Covers aarch64 + musl + a non-BusyBox banned-function profile.
+# ---------------------------------------------------------------------------
+
+[[binary]]
+name = "curl"
+version = "8.7.1"
+arch = "aarch64-musl"
+description = "Static curl built against musl (aarch64)"
+upstream_license = "curl"
+url = "https://github.com/stunnel/static-curl/releases/download/8.7.1/curl-linux-aarch64-musl-8.7.1.tar.xz"
+sha256 = "PLACEHOLDER_FILL_ON_FIRST_RUN"
+expected = "tests/external/expected/curl-8.7.1-aarch64.json"
+notes = "Tarball; verify-external.sh extracts the inner `curl` ELF before checking."
+
+# ---------------------------------------------------------------------------
+# Debian glibc samples - representative of the most common embedded Linux
+# user-space (Debian / Ubuntu / Yocto-with-glibc). Pulled directly from the
+# Debian pool so the source-of-record is reproducible.
+# ---------------------------------------------------------------------------
+
+[[binary]]
+name = "wget"
+version = "1.21.3-1+deb12u1"
+arch = "x86_64-glibc"
+description = "GNU Wget from Debian 12 (bookworm) main pool"
+upstream_license = "GPL-3.0-or-later"
+url = "https://deb.debian.org/debian/pool/main/w/wget/wget_1.21.3-1+deb12u1_amd64.deb"
+sha256 = "PLACEHOLDER_FILL_ON_FIRST_RUN"
+expected = "tests/external/expected/wget-1.21.3-x86_64.json"
+notes = ".deb container; verify-external.sh extracts ./usr/bin/wget."
+
+[[binary]]
+name = "coreutils-ls"
+version = "9.1-1"
+arch = "x86_64-glibc"
+description = "GNU coreutils `ls` from Debian 12 (bookworm) main pool"
+upstream_license = "GPL-3.0-or-later"
+url = "https://deb.debian.org/debian/pool/main/c/coreutils/coreutils_9.1-1_amd64.deb"
+sha256 = "PLACEHOLDER_FILL_ON_FIRST_RUN"
+expected = "tests/external/expected/coreutils-ls-9.1-x86_64.json"
+notes = ".deb container; verify-external.sh extracts ./usr/bin/ls. Used as the canonical glibc + fortify reference (expect __*_chk variants present)."

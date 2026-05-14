@@ -189,6 +189,51 @@ fn format_table(results: &[CheckResult]) -> String {
                         Cell::new(".note.gnu.build-id present"),
                     ]);
                 }
+
+                // F5 (BHC014): libc flavor
+                if let Some(libc) = &elf.libc_flavor {
+                    table.add_row(vec![
+                        Cell::new("libc Flavor"),
+                        Cell::new("INFO".cyan().to_string()),
+                        Cell::new(libc.to_string()),
+                    ]);
+                }
+
+                // F1 (BHC010): banned functions
+                if let Some(bf) = &elf.banned_functions
+                    && !bf.is_empty()
+                {
+                    let mut high: Vec<&str> = Vec::new();
+                    let mut med: Vec<&str> = Vec::new();
+                    let mut low: Vec<&str> = Vec::new();
+                    for d in bf {
+                        match d.function.severity {
+                            crate::banned::Severity::High => high.push(&d.function.name),
+                            crate::banned::Severity::Medium => med.push(&d.function.name),
+                            crate::banned::Severity::Low => low.push(&d.function.name),
+                        }
+                    }
+                    let mut parts: Vec<String> = Vec::new();
+                    if !high.is_empty() {
+                        parts.push(format!("HIGH: {}", high.join(", ")));
+                    }
+                    if !med.is_empty() {
+                        parts.push(format!("MEDIUM: {}", med.join(", ")));
+                    }
+                    if !low.is_empty() {
+                        parts.push(format!("LOW: {}", low.join(", ")));
+                    }
+                    let status = if !high.is_empty() {
+                        fail_label()
+                    } else {
+                        warn_label()
+                    };
+                    table.add_row(vec![
+                        Cell::new("Banned Functions"),
+                        Cell::new(status),
+                        Cell::new(parts.join("; ")),
+                    ]);
+                }
             }
             FormatResult::Pe(pe) => {
                 table.add_row(vec![
@@ -466,8 +511,10 @@ fn rule_help_uri(rule_id: &str) -> String {
         "BHC004" => "#pie-aslr",
         "BHC005" => "#fortify-source",
         "BHC006" | "BHC007" => "#rpath-runpath",
+        "BHC010" => "#banned-functions",
         "BHC011" => "#suid-sgid",
         "BHC013" => "#static-pie",
+        "BHC014" => "#libc-flavor",
         "BHC104" => "#cfg",
         "BHC105" => "#safeseh",
         "BHC206" => "#code-signature",
@@ -500,10 +547,22 @@ fn rule_level(rule_id: &str, details: &str, warn_only: bool) -> &'static str {
         "BHC005" => "warning",
         // RPATH/RUNPATH present → warning
         "BHC006" | "BHC007" => "warning",
+        // F1 banned function: severity is encoded in `details` ("HIGH"/"MEDIUM"/"LOW: <fn>")
+        "BHC010" => {
+            if details.starts_with("HIGH") {
+                "error"
+            } else if details.starts_with("MEDIUM") {
+                "warning"
+            } else {
+                "note"
+            }
+        }
         // SUID/SGID present → warning (informational; --strict promotes to exit 1)
         "BHC011" => "warning",
         // Linkage classification → note (informational only)
         "BHC013" => "note",
+        // F5 libc flavor → note (informational only, never a failure)
+        "BHC014" => "note",
         // SafeSEH missing (PE) → warning
         "BHC105" => "warning",
         // PIE missing (Mach-O) → error
@@ -688,6 +747,39 @@ fn collect_check_items(result: &CheckResult) -> Vec<(String, String, bool, Strin
                     String::new()
                 },
                 false,
+            ));
+            // F1 / BHC010: emit one item per detected banned function. HIGH
+            // becomes a SARIF "error" (driven by `rule_level` reading the
+            // details prefix); MEDIUM → "warning"; LOW → "note". `warn_only`
+            // is false for HIGH so that `format_sarif`'s suppression heuristic
+            // (warn_only → "note") does not down-rank HIGH detections.
+            if let Some(bf) = &elf.banned_functions {
+                for det in bf {
+                    // warn_only is left false so `rule_level` (which short-circuits
+                    // to "note" when warn_only is true) can dispatch on the
+                    // severity prefix in `details` and emit error/warning/note as
+                    // appropriate.
+                    items.push((
+                        "BHC010".to_string(),
+                        "Banned Function".to_string(),
+                        false, // detection is always a finding
+                        format!("{}: {}", det.function.severity, det.function.name),
+                        false,
+                    ));
+                }
+            }
+            // F5 / BHC014: libc flavor is informational-only; register the rule
+            // by emitting a passing item (warn_only=true → never produces a
+            // SARIF result row, but the rule definition appears in the run).
+            items.push((
+                "BHC014".to_string(),
+                "libc Flavor".to_string(),
+                true,
+                match &elf.libc_flavor {
+                    Some(l) => l.to_string(),
+                    None => "unknown".to_string(),
+                },
+                true,
             ));
         }
         FormatResult::Pe(pe) => {
@@ -881,6 +973,8 @@ mod tests {
                 linkage: None,
                 df_1_pie: false,
                 debug_info: no_elf_debug(),
+                libc_flavor: None,
+                banned_functions: None,
             }),
             file_mode: None,
         }
@@ -908,6 +1002,8 @@ mod tests {
                     has_strtab: true,
                     build_id: None,
                 },
+                libc_flavor: None,
+                banned_functions: None,
             }),
             file_mode: None,
         }
@@ -1290,8 +1386,10 @@ mod tests {
         let result = sample_elf_result_all_pass();
         let items = collect_check_items(&result);
         // 9 existing (RELRO/Canary/NX/PIE/Fortify/RPATH/RUNPATH/Debug/Symtab)
-        // + 1 F4 BHC013 Linkage. file_mode is None in the fixture so no BHC011 row.
-        assert_eq!(items.len(), 10, "ELF should produce 10 check items");
+        // + 1 F4 BHC013 Linkage + 1 F5 BHC014 libc Flavor (informational, always
+        // emitted). file_mode is None in the fixture so no BHC011 row, and
+        // banned_functions is None so no BHC010 rows.
+        assert_eq!(items.len(), 11, "ELF should produce 11 check items");
     }
 
     #[test]

@@ -1,0 +1,18 @@
+{
+  "_comment": "Expected output for verify-external.sh. Update on first verified run; PENDING_FIRST_VERIFICATION values are placeholders.",
+  "binary": "busybox",
+  "version": "1.36.1",
+  "arch": "armv7l",
+  "expected": {
+    "linkage": "static",
+    "libc": "musl",
+    "banned_functions": [
+      {"name": "strcpy", "severity": "HIGH"},
+      {"name": "strcat", "severity": "HIGH"},
+      {"name": "sprintf", "severity": "HIGH"},
+      {"name": "system", "severity": "HIGH"}
+    ],
+    "fortify_source": false
+  },
+  "_notes": "Cross-arch sibling of busybox-x86_64; results should match modulo arch-specific symbol names. Confirms F1/F5 are arch-independent."
+}

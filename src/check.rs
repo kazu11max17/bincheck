@@ -4,9 +4,19 @@ use std::io;
 use goblin::Object;
 use serde::Serialize;
 
-use crate::elf::{ElfCheckResult, check_elf};
+use crate::banned::BannedFunction;
+use crate::elf::{ElfCheckResult, check_elf_with_bytes};
 use crate::macho::{MachoCheckResult, check_macho};
 use crate::pe::{PeCheckResult, check_pe};
+
+/// Per-invocation options that the file-level check honours. Currently this
+/// only carries the F1 banned-function list; future flags (profile selection,
+/// strict/skip lists) will land here.
+#[derive(Debug, Clone, Default)]
+pub struct CheckOptions {
+    /// Banned-function list to scan for. `None` skips F1.
+    pub banned_functions: Option<Vec<BannedFunction>>,
+}
 
 /// F2 (BHC011): file-level SUID/SGID/symlink classification.
 ///
@@ -119,10 +129,17 @@ impl CheckResult {
     }
 
     /// True when at least one check is in a *warn* (not error) state.
-    /// Currently this is only F2 SUID/SGID detection; consumers wire this into
-    /// `--strict` so warnings become exit-1.
+    /// Sources: F2 SUID/SGID, F1 banned-function MEDIUM/LOW. `--strict` wires
+    /// this into the exit-1 path; without `--strict` warnings are reported
+    /// but do not change the exit code.
     pub fn has_warnings(&self) -> bool {
-        self.file_mode.as_ref().is_some_and(|m| m.is_warning())
+        if self.file_mode.as_ref().is_some_and(|m| m.is_warning()) {
+            return true;
+        }
+        match &self.result {
+            FormatResult::Elf(r) => r.has_warn_banned(),
+            _ => false,
+        }
     }
 }
 
@@ -155,17 +172,27 @@ pub enum FormatResult {
     Unsupported,
 }
 
-/// Check a binary file for security properties
+/// Check a binary file for security properties (default options).
 pub fn check_file(path: &str) -> Result<CheckResult, io::Error> {
+    check_file_with_options(path, &CheckOptions::default())
+}
+
+/// Check a binary file for security properties with caller-provided options
+/// (F1 banned list, etc).
+pub fn check_file_with_options(path: &str, opts: &CheckOptions) -> Result<CheckResult, io::Error> {
     // F2: capture mode bits *before* fs::read follows the symlink. We still
     // call fs::read afterwards so the binary content check runs against the
     // resolved target — symlink_metadata only tells us about the entry itself.
     let file_mode = Some(detect_file_mode(path));
 
     let bytes = fs::read(path)?;
+    let banned_slice = opts.banned_functions.as_deref();
 
     let (format, result) = match Object::parse(&bytes) {
-        Ok(Object::Elf(elf)) => (BinaryFormat::Elf, FormatResult::Elf(check_elf(&elf))),
+        Ok(Object::Elf(elf)) => (
+            BinaryFormat::Elf,
+            FormatResult::Elf(check_elf_with_bytes(&elf, &bytes, banned_slice)),
+        ),
         Ok(Object::PE(pe)) => (BinaryFormat::Pe, FormatResult::Pe(check_pe(&pe))),
         Ok(Object::Mach(_)) => match check_macho(&bytes) {
             Some(r) => (BinaryFormat::MachO, FormatResult::MachO(r)),
@@ -233,6 +260,8 @@ mod tests {
                 has_strtab: false,
                 build_id: None,
             },
+            libc_flavor: None,
+            banned_functions: None,
         };
         let result = CheckResult {
             file_path: "test.elf".to_string(),
@@ -569,6 +598,8 @@ mod tests {
                     has_strtab: false,
                     build_id: None,
                 },
+                libc_flavor: None,
+                banned_functions: None,
             }),
             file_mode: None,
         };
