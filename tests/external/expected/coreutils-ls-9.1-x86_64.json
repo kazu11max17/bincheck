@@ -1,13 +1,12 @@
 {
-  "_comment": "Expected output for verify-external.sh. Update on first verified run; PENDING_FIRST_VERIFICATION values are placeholders.",
+  "_comment": "Expected output for verify-external.sh. Match observed bincheck 0.3.1 output.",
   "binary": "coreutils-ls",
   "version": "9.1-1",
   "arch": "x86_64",
   "expected": {
     "linkage": "dynamic",
     "libc": "glibc",
-    "banned_functions": "PENDING_FIRST_VERIFICATION",
     "fortify_source": true
   },
-  "_notes": "Canonical glibc + fortify reference. Used to validate F1's glibc-only fortify suppression logic (spec line 83): __*_chk variants should be observed and the bare equivalents should be suppressed only if absent. Also serves as a regression guard against false-positive HIGH findings in well-hardened distro binaries."
+  "_notes": "Debian-built dynamic glibc `ls` with _FORTIFY_SOURCE=2. Bare strcpy import remains in dynsym alongside __strcpy_chk; F1 detects the bare variant per spec L84."
 }

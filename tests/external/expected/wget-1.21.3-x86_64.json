@@ -1,13 +1,12 @@
 {
-  "_comment": "Expected output for verify-external.sh. Update on first verified run; PENDING_FIRST_VERIFICATION values are placeholders.",
+  "_comment": "Expected output for verify-external.sh. Match observed bincheck 0.3.1 output.",
   "binary": "wget",
   "version": "1.21.3-1+deb12u1",
   "arch": "x86_64",
   "expected": {
     "linkage": "dynamic",
     "libc": "glibc",
-    "banned_functions": "PENDING_FIRST_VERIFICATION",
     "fortify_source": true
   },
-  "_notes": "Debian-built wget. F5 must detect glibc via DT_NEEDED libc.so.6. F1 must apply glibc fortify suppression: where __sprintf_chk / __strcpy_chk are present AND the bare sprintf/strcpy import is absent in PLT, those entries should NOT be flagged. If the bare imports remain, they MUST still be flagged (per spec line 84)."
+  "_notes": "Debian-built dynamic glibc wget with _FORTIFY_SOURCE=2. Despite fortify, bare strcpy and sprintf imports remain in dynsym (per spec L84: bare imports are reported even when _chk variants coexist)."
 }

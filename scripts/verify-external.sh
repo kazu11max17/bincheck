@@ -88,6 +88,7 @@ verify_one() {
     local expected_path; expected_path=$(echo "$entry" | jq -r '.expected')
     local notes; notes=$(echo "$entry" | jq -r '.notes // ""')
     local license; license=$(echo "$entry" | jq -r '.upstream_license // "unknown"')
+    local extract_target; extract_target=$(echo "$entry" | jq -r '.extract_target // ""')
 
     local tag="${name}-${version}-${arch}"
     local download_basename; download_basename="${url##*/}"
@@ -134,8 +135,9 @@ verify_one() {
             local extract_dir="${download_path}.extracted"
             mkdir -p "$extract_dir"
             tar -xf "$download_path" -C "$extract_dir"
-            elf_path="$(find "$extract_dir" -type f -name "${name##*-}" | head -n1)"
-            if [[ -z "$elf_path" ]]; then
+            if [[ -n "$extract_target" && -f "$extract_dir/$extract_target" ]]; then
+                elf_path="$extract_dir/$extract_target"
+            else
                 elf_path="$(find "$extract_dir" -type f -executable | head -n1)"
             fi
             ;;
@@ -144,10 +146,9 @@ verify_one() {
             mkdir -p "$extract_dir"
             ( cd "$extract_dir" && ar x "$download_path" && \
               tar -xf data.tar.* )
-            # name="coreutils-ls" → look for /usr/bin/ls; name="wget" → /usr/bin/wget
-            local short_name="${name##*-}"
-            elf_path="$(find "$extract_dir/usr" -type f -name "$short_name" 2>/dev/null | head -n1)"
-            if [[ -z "$elf_path" ]]; then
+            if [[ -n "$extract_target" && -f "$extract_dir/$extract_target" ]]; then
+                elf_path="$extract_dir/$extract_target"
+            else
                 elf_path="$(find "$extract_dir" -type f -executable | head -n1)"
             fi
             ;;
@@ -260,7 +261,7 @@ DATE_JST="$(TZ=Asia/Tokyo date +%Y-%m-%d)"
     echo ""
     echo "---"
     echo ""
-    echo "All product names mentioned in this document are trademarks or registered"
+    echo "All product, project, and distribution names mentioned in this document are trademarks or registered"
     echo "trademarks of their respective owners. They are used here solely for"
     echo "descriptive identification of test targets and do not imply endorsement,"
     echo "sponsorship, or affiliation."

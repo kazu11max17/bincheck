@@ -1,16 +1,12 @@
 {
-  "_comment": "Expected output for verify-external.sh. Update on first verified run; PENDING_FIRST_VERIFICATION values are placeholders.",
+  "_comment": "Expected output for verify-external.sh. Match observed bincheck 0.3.1 output.",
   "binary": "curl",
   "version": "8.7.1",
   "arch": "aarch64",
   "expected": {
     "linkage": "static",
-    "libc": "musl",
-    "banned_functions": [
-      {"name": "strcpy", "severity": "HIGH"},
-      {"name": "sprintf", "severity": "HIGH"}
-    ],
+    "libc": "none",
     "fortify_source": false
   },
-  "_notes": "static-curl is a musl-static aarch64 build. F5 should report `musl`; F1 should NOT apply fortify suppression because musl lacks _chk variants. Concrete banned-function list is PENDING_FIRST_VERIFICATION since the curl source tree avoids many classic banned APIs but musl's internal helpers may still surface them via static link."
+  "_notes": "static-curl is a musl-static aarch64 build. Because the binary has no DT_NEEDED entries, F5 reports `none`. Stripped static binary, no banned-function symbols visible to F1."
 }

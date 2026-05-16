@@ -1,0 +1,12 @@
+{
+  "_comment": "Expected output for verify-external.sh. Match observed bincheck 0.3.1 output.",
+  "binary": "busybox",
+  "version": "1.35.0",
+  "arch": "x86_64",
+  "expected": {
+    "linkage": "static",
+    "libc": "none",
+    "fortify_source": false
+  },
+  "_notes": "BusyBox upstream is musl-static built. Because the binary has no DT_NEEDED entries, F5 reports `none` (static, libc indeterminable from dynamic section alone). Stripped static binary, banned-function dynsym/symtab walk yields no matches."
+}
